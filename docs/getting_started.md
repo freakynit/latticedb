@@ -12,6 +12,7 @@ Use this path if you want the fastest route to a working example:
 | Python | local apps, scripts, notebooks | [../bindings/python/README.md](../bindings/python/README.md) |
 | TypeScript | Node.js services and tooling | [../bindings/typescript/README.md](../bindings/typescript/README.md) |
 | Go | cgo-backed native client | [../bindings/go/README.md](../bindings/go/README.md) |
+| Java | JVM applications using JNI | [../bindings/java/README.md](../bindings/java/README.md) |
 
 For a larger graph/vector/text demo, see [../examples/README.md](../examples/README.md).
 
@@ -67,6 +68,7 @@ $LATTICE check /tmp/lattice-quickstart.lattice
 - Published Python wheels are expected to bundle `liblattice` on supported platforms.
 - Published TypeScript package tarballs are expected to bundle `liblattice` on supported platforms.
 - Go currently uses an installed-prefix or repo-local shared-library workflow rather than bundled native artifacts.
+- Java currently compiles its JNI bridge and stages `liblattice` from a source checkout during the Maven build.
 
 If you are developing from a source checkout, see the binding READMEs for staged-library and installed-prefix workflows.
 

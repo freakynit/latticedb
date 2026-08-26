@@ -46,6 +46,10 @@ npm install @hajewski/latticedb
 
 Published package tarballs are expected to bundle `liblattice` on supported platforms. Source checkouts can stage the native library into the package with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib npm run bundle:native`.
 
+**Java**
+
+Requires JDK 21+. See [bindings/java/README.md](bindings/java/README.md) for the Maven build, which compiles the JNI bridge and stages `liblattice` from `zig-out/lib`. A runnable knowledge-graph example is in [bindings/java/src/main/java/io/latticedb/examples](bindings/java/src/main/java/io/latticedb/examples).
+
 **Go**
 
 See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow. The default consumer path uses installed `pkg-config` metadata; in-repo development can use `-tags repolocal` against `zig-out/lib`.
@@ -55,7 +59,7 @@ Recent binding-surface cleanups moved embedding helpers into dedicated modules a
 
 ## Start Here
 
-- [Getting Started](docs/getting_started.md) maps the shortest path for CLI, Python, TypeScript, and Go.
+- [Getting Started](docs/getting_started.md) maps the shortest path for CLI, Python, TypeScript, Go, and Java.
 - [CLI Quickstart](examples/cli/README.md) is the smallest copy-paste example in the repo.
 - [Examples Overview](examples/README.md) covers the larger graph/vector/text retrieval demos.
 
@@ -215,6 +219,42 @@ if err != nil {
 }
 ```
 
+### Java
+
+```java
+import io.latticedb.*;
+import java.util.List;
+import java.util.Map;
+
+try (Database db = Database.open("knowledge.db",
+        OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(128))) {
+
+    // Build a graph
+    try (Transaction txn = db.beginWrite()) {
+        Node chunk = txn.createNode(List.of("Chunk"),
+                Map.of("text", "The transformer architecture uses self-attention..."));
+        txn.setVector(chunk.id(), "embedding",
+                Embedding.hashEmbed("transformer self-attention", 128));
+        txn.ftsIndex(chunk.id(), "The transformer architecture uses self-attention...");
+        txn.commit();
+    }
+
+    // Query across vector search + graph traversal
+    QueryResult results = db.query(
+            "MATCH (chunk:Chunk) " +
+            "WHERE chunk.embedding <=> $query < 0.5 " +
+            "RETURN chunk.text " +
+            "ORDER BY chunk.embedding <=> $query LIMIT 5",
+            Map.of("query", Embedding.hashEmbed("attention mechanism", 128)));
+
+    for (Map<String, Object> row : results.rows()) {
+        System.out.println(row.get("chunk.text"));
+    }
+}
+```
+
+See [bindings/java/README.md](bindings/java/README.md) for build instructions and the full runnable example.
+
 ## Performance
 
 Benchmarked on Apple M1, single-threaded, with auto-scaled buffer pool. Run `zig build benchmark` to reproduce.
@@ -373,7 +413,7 @@ LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 an
 - Online freelist reuse plus `lattice compact` for safe physical tail reclamation
 - Zero configuration — open a file and start working
 - Embedded single-writer model for local applications
-- Clean C API; Python, TypeScript, and Go bindings wrap it
+- Clean C API; Python, TypeScript, Go, and Java bindings wrap it
 
 ## Use Cases
 
@@ -444,6 +484,7 @@ The links below are the in-repo copies and design notes.
 - [Python API Reference](bindings/python/README.md)
 - [TypeScript API Reference](bindings/typescript/README.md)
 - [Go API Reference](bindings/go/README.md)
+- [Java API Reference](bindings/java/README.md)
 - [C API Header](include/lattice.h)
 
 ## License
