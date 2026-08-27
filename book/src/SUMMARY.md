@@ -22,6 +22,7 @@
 
 - [Opening a Database](./configuration/opening.md)
 - [Storage Modes](./configuration/storage-modes.md)
+- [In-Memory Databases](./configuration/in-memory.md)
 - [Durability and the Log](./configuration/durability.md)
 
 # Guides

@@ -2,6 +2,26 @@
 
 This guide walks through creating a small knowledge graph with documents and authors, storing embeddings, indexing text, and querying across all three search modes.
 
+## The fastest thing that works
+
+Before the full example, here is the smallest one. Pass `:memory:` as the path and
+you get a real database with nothing to create and nothing to clean up:
+
+```python
+from latticedb import Database
+
+db = Database(":memory:")
+db.query("CREATE (a:Person {name: 'Alice'})")
+print(db.query("MATCH (p:Person) RETURN p.name"))
+```
+
+Everything works the same as a database on disk — transactions, indexes, vector
+and text search — it just disappears when you close it. It is the easiest way to
+try a query, and it is what tests usually want. See
+[In-Memory Databases](../configuration/in-memory.md).
+
+Swap `":memory:"` for a filename when you want to keep the results.
+
 ## Python
 
 ```python

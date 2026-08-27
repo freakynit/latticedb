@@ -127,4 +127,39 @@ If a write transaction is not explicitly committed, it is rolled back when the c
 
 ## Single-File Storage
 
-The entire database — nodes, edges, properties, vector index, text index, and write-ahead log — lives in a single file. This makes databases portable and easy to manage: copy, back up, or deploy by moving one file.
+The entire database — nodes, edges, properties, vector index, and text index —
+lives in a single file, with the write-ahead log beside it while the database is
+open. That makes a database easy to move: back it up or deploy it by moving one
+file.
+
+It also makes it easy to move without a file at all. Because a database is one
+file, serializing it is reading that file, so you can hand a whole database around
+as bytes and open it again elsewhere:
+
+```python
+blob = db.serialize()
+db2 = latticedb.deserialize(blob)
+```
+
+That is what makes it practical to keep a database per case or per tenant in
+object storage, pulling one down when you need it.
+
+One caveat worth learning early: **do not copy the file while the database is
+open.** The log holds committed changes the main file does not have yet, so a copy
+taken then is broken in a way you only discover when you try to use it. Use
+`lattice backup`, or stop the process first.
+
+## Databases Without Files
+
+A database does not have to be on disk at all. Open `:memory:` and it lives
+entirely in memory:
+
+```python
+db = latticedb.Database(":memory:")
+```
+
+Everything works the same — transactions, indexes, vector and text search — and it
+disappears when you close it. It is the quickest way to try something, the usual
+choice for tests, and what a database loaded from bytes runs on.
+
+See [In-Memory Databases](../configuration/in-memory.md).
