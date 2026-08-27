@@ -1013,7 +1013,7 @@ pub const QueryPlanner = struct {
                 input,
                 output_slot,
                 query_text,
-                100, // Default limit
+                fts_ops.NO_RESULT_LIMIT,
                 database,
                 label,
                 property,
@@ -1031,7 +1031,7 @@ pub const QueryPlanner = struct {
             input,
             output_slot,
             param_name,
-            100, // Default limit
+            fts_ops.NO_RESULT_LIMIT,
             database,
             label,
             property,

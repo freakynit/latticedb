@@ -5152,3 +5152,52 @@ test "database: declared full-text indexes survive a reopen" {
     try std.testing.expectEqual(@as(usize, 1), found.len);
     try std.testing.expect(ftsContains(found, indexed_id));
 }
+
+test "database: a full-text match returns every row, not the first hundred" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+    try db.createNodeFtsIndex("Doc", "body");
+
+    // More than the hundred the planner used to pass as a default limit.
+    const total = 250;
+    var txn = try db.beginTransaction(.read_write);
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(&txn, node, "title", .{ .string_val = "loaf" });
+        try db.setNodeProperty(&txn, node, "body", .{ .string_val = "filler" });
+    }
+    try db.commitTransaction(&txn);
+
+    // The query says nothing about how many rows it wants, so it wants all of
+    // them. Returning a hundred was a silent truncation with nothing in the
+    // query to suggest it.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'loaf' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, total), r.rowCount());
+    }
+
+    // And the same predicate inside an OR, which the planner sends down the row
+    // filter instead of an index scan. The two used to use different bounds, so
+    // moving a predicate into an OR changed how many rows came back.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'loaf' OR d.body @@ 'zzznotfound' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, total), r.rowCount());
+    }
+
+    // An explicit LIMIT is still honoured; the point is that one absent from the
+    // query is not invented.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'loaf' RETURN d.title AS t LIMIT 10");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 10), r.rowCount());
+    }
+}

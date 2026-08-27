@@ -158,6 +158,21 @@ pub const FtsSearch = struct {
 /// filters results to only include nodes that the input operator produces.
 /// Used for queries like: MATCH (d:Doc) WHERE d.text @@ $query
 /// or: MATCH (d:Doc) WHERE d.text @@ "literal search"
+/// How many matches a full-text search may return when the query asked for no
+/// particular number.
+///
+/// There is no cap. A predicate with no LIMIT beside it means every row that
+/// matches, and any smaller number would drop rows the user asked for without
+/// saying so. The search applies this by trimming a result set it has already
+/// built, so a large value costs nothing up front.
+///
+/// This was 100 for both constructors, which made `WHERE d.title @@ 'loaf'`
+/// return a hundred rows out of five thousand matches, silently, with no LIMIT
+/// anywhere in the query — and return all five thousand once the same predicate
+/// was moved inside an OR, because the row filter used a different bound. Same
+/// predicate, same data, two answers depending on where it sat.
+pub const NO_RESULT_LIMIT: u32 = std.math.maxInt(u32);
+
 pub const FtsSearchWithInput = struct {
     /// Input operator - used to filter FTS results
     input: Operator,

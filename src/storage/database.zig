@@ -3508,7 +3508,9 @@ pub const Database = struct {
         const pending = overlay.?;
 
         const extra: u32 = @intCast(pending.node_states.count());
-        const base_results = index.search(query_text, limit + extra) catch |err| return mapFtsError(err);
+        // Saturating: a caller wanting every match passes the largest u32 there
+        // is, and asking for a few more than that wraps to nearly none.
+        const base_results = index.search(query_text, limit +| extra) catch |err| return mapFtsError(err);
         defer self.freeFtsSearchResults(base_results);
 
         var merged: std.ArrayListUnmanaged(FtsSearchResult) = .empty;
@@ -6160,7 +6162,7 @@ pub const Database = struct {
                 }
 
                 const extra: u32 = @intCast(overlay.fts_docs.count());
-                const base_results = try self.ftsSearch(query_text, limit + extra);
+                const base_results = try self.ftsSearch(query_text, limit +| extra);
                 defer self.freeFtsSearchResults(base_results);
 
                 var merged: std.ArrayListUnmanaged(FtsSearchResult) = .empty;

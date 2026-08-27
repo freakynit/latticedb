@@ -773,8 +773,12 @@ pub const FtsIndex = struct {
                 };
 
                 // Early exit if we have enough results (before sorting)
-                // This is an optimization for large result sets
-                if (results.items.len >= limit * 2) {
+                // This is an optimization for large result sets.
+                //
+                // Saturating, because a caller asking for every match passes the
+                // largest u32 there is and doubling it overflows. That is not a
+                // theoretical caller: a query with no LIMIT means every row.
+                if (results.items.len >= limit *| 2) {
                     break;
                 }
             }
@@ -857,7 +861,7 @@ pub const FtsIndex = struct {
             // Skip short terms for fuzzy matching
             if (normalized.len < fuzzy_config.min_term_length) {
                 // Try exact match for short terms
-                const results = try self.searchSingleTerm(normalized, limit * 2);
+                const results = try self.searchSingleTerm(normalized, limit *| 2);
                 defer self.allocator.free(results);
                 for (results) |doc| {
                     const current = doc_scores.get(doc.doc_id) orelse 0.0;
@@ -1189,7 +1193,7 @@ pub const FtsIndex = struct {
             for (phrases_buf[0][0..phrase_lens[0]], 0..) |t, i| {
                 const_phrase[i] = t;
             }
-            candidates = try self.searchPhraseTerms(const_phrase[0..phrase_lens[0]], limit * 4);
+            candidates = try self.searchPhraseTerms(const_phrase[0..phrase_lens[0]], limit *| 4);
             candidates_owned = true;
 
             // Intersect with additional phrases
@@ -1198,7 +1202,7 @@ pub const FtsIndex = struct {
                 for (phrases_buf[p][0..phrase_lens[p]], 0..) |t, i| {
                     next_phrase[i] = t;
                 }
-                const phrase_results = try self.searchPhraseTerms(next_phrase[0..phrase_lens[p]], limit * 4);
+                const phrase_results = try self.searchPhraseTerms(next_phrase[0..phrase_lens[p]], limit *| 4);
                 defer self.allocator.free(phrase_results);
 
                 // Build set of phrase matches
@@ -1229,13 +1233,13 @@ pub const FtsIndex = struct {
             if (num_terms > 0) {
                 const term_results = switch (mode) {
                     .@"and" => if (num_terms == 1)
-                        try self.searchSingleTerm(const_terms[0], limit * 4)
+                        try self.searchSingleTerm(const_terms[0], limit *| 4)
                     else
-                        try self.searchMultiTerm(const_terms[0..num_terms], limit * 4),
+                        try self.searchMultiTerm(const_terms[0..num_terms], limit *| 4),
                     .@"or" => if (num_terms == 1)
-                        try self.searchSingleTerm(const_terms[0], limit * 4)
+                        try self.searchSingleTerm(const_terms[0], limit *| 4)
                     else
-                        try self.searchMultiTermOr(const_terms[0..num_terms], limit * 4),
+                        try self.searchMultiTermOr(const_terms[0..num_terms], limit *| 4),
                 };
                 defer self.allocator.free(term_results);
 
@@ -1285,13 +1289,13 @@ pub const FtsIndex = struct {
             // No phrases (or positions not stored), just use term search
             candidates = switch (mode) {
                 .@"and" => if (num_terms == 1)
-                    try self.searchSingleTerm(const_terms[0], limit * 2)
+                    try self.searchSingleTerm(const_terms[0], limit *| 2)
                 else
-                    try self.searchMultiTerm(const_terms[0..num_terms], limit * 2),
+                    try self.searchMultiTerm(const_terms[0..num_terms], limit *| 2),
                 .@"or" => if (num_terms == 1)
-                    try self.searchSingleTerm(const_terms[0], limit * 2)
+                    try self.searchSingleTerm(const_terms[0], limit *| 2)
                 else
-                    try self.searchMultiTermOr(const_terms[0..num_terms], limit * 2),
+                    try self.searchMultiTermOr(const_terms[0..num_terms], limit *| 2),
             };
             candidates_owned = true;
         } else {

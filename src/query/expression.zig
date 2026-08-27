@@ -16,6 +16,7 @@ const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
 
 const vector_distance = @import("../vector/distance.zig");
+const fts_ops = @import("operators/fts.zig");
 
 const Row = executor.Row;
 
@@ -23,11 +24,11 @@ const Row = executor.Row;
 /// than planned as a scan.
 ///
 /// The filter only needs to know whether one particular node is among the
-/// matches, so this bounds the work rather than expressing a result limit. It is
-/// large enough that a node matching the query will be found, and small enough
-/// that a broad query does not materialise the corpus. A planner that turns the
-/// predicate into a scan avoids the question entirely.
-const FTS_FILTER_LIMIT: u32 = 10_000;
+/// matches, so this bounds the work rather than expressing a result limit. It
+/// matches the bound the index scan uses, because the two have to agree: when
+/// they did not, the same predicate returned a different number of rows at the
+/// top of a WHERE clause than it did inside an OR.
+const FTS_FILTER_LIMIT: u32 = fts_ops.NO_RESULT_LIMIT;
 const SlotValue = executor.SlotValue;
 const ExecutionContext = executor.ExecutionContext;
 
