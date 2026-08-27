@@ -103,9 +103,10 @@ pub const PropertyIndex = struct {
     }
 
     pub fn indexNode(self: *Self, node_id: u64, labels: []const SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter = try self.definitionIterator(.node);
+        var iter: DefinitionIterator = undefined;
+        try self.iterateDefinitions(.node, &iter);
         defer iter.deinit();
-        while (try nextDefinition(&iter)) |definition| {
+        while (try iter.next()) |definition| {
             if (!containsSymbol(labels, definition.scope_id)) continue;
             if (findProperty(properties, definition.property_id)) |property| {
                 try self.add(definition, node_id, property.value);
@@ -114,9 +115,10 @@ pub const PropertyIndex = struct {
     }
 
     pub fn removeNode(self: *Self, node_id: u64, labels: []const SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter = try self.definitionIterator(.node);
+        var iter: DefinitionIterator = undefined;
+        try self.iterateDefinitions(.node, &iter);
         defer iter.deinit();
-        while (try nextDefinition(&iter)) |definition| {
+        while (try iter.next()) |definition| {
             if (!containsSymbol(labels, definition.scope_id)) continue;
             if (findProperty(properties, definition.property_id)) |property| {
                 try self.remove(definition, node_id, property.value);
@@ -125,9 +127,10 @@ pub const PropertyIndex = struct {
     }
 
     pub fn indexEdge(self: *Self, edge_id: u64, edge_type: SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter = try self.definitionIterator(.edge);
+        var iter: DefinitionIterator = undefined;
+        try self.iterateDefinitions(.edge, &iter);
         defer iter.deinit();
-        while (try nextDefinition(&iter)) |definition| {
+        while (try iter.next()) |definition| {
             if (definition.scope_id != edge_type) continue;
             if (findProperty(properties, definition.property_id)) |property| {
                 try self.add(definition, edge_id, property.value);
@@ -136,9 +139,10 @@ pub const PropertyIndex = struct {
     }
 
     pub fn removeEdge(self: *Self, edge_id: u64, edge_type: SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter = try self.definitionIterator(.edge);
+        var iter: DefinitionIterator = undefined;
+        try self.iterateDefinitions(.edge, &iter);
         defer iter.deinit();
-        while (try nextDefinition(&iter)) |definition| {
+        while (try iter.next()) |definition| {
             if (definition.scope_id != edge_type) continue;
             if (findProperty(properties, definition.property_id)) |property| {
                 try self.remove(definition, edge_id, property.value);
@@ -209,10 +213,38 @@ pub const PropertyIndex = struct {
         }
     }
 
-    pub fn definitionIterator(self: *Self, kind: EntityKind) PropertyIndexError!BTree.Iterator {
-        const start = [_]u8{@intFromEnum(kind)};
-        const end = [_]u8{@intFromEnum(kind) + 1};
-        return self.catalog.range(&start, &end) catch |err| return mapBTreeError(err);
+    /// A walk over the definitions of one kind.
+    ///
+    /// The iterator owns its bounds. The tree's iterator keeps the end key as a
+    /// slice and compares against it on every step, so building the bounds in
+    /// locals and returning the iterator leaves those comparisons reading a stack
+    /// frame that no longer exists. That does not crash. It reads whatever the
+    /// next call left there, and the walk either ends early or never starts —
+    /// silently, and differently depending on what the caller happens to have on
+    /// its stack, which is why this stood for so long without a failing test.
+    pub const DefinitionIterator = struct {
+        inner: BTree.Iterator,
+        start: [1]u8 = undefined,
+        end: [1]u8 = undefined,
+
+        pub fn next(self: *DefinitionIterator) PropertyIndexError!?Definition {
+            return nextDefinition(&self.inner);
+        }
+
+        pub fn deinit(self: *DefinitionIterator) void {
+            self.inner.deinit();
+        }
+    };
+
+    /// Walk every definition of one kind.
+    ///
+    /// Written into `out` rather than returned, because the iterator holds the
+    /// bounds it compares against and moving it would leave those comparisons
+    /// pointing at the copy left behind.
+    pub fn iterateDefinitions(self: *Self, kind: EntityKind, out: *DefinitionIterator) PropertyIndexError!void {
+        out.start = .{@intFromEnum(kind)};
+        out.end = .{@intFromEnum(kind) + 1};
+        out.inner = self.catalog.range(&out.start, &out.end) catch |err| return mapBTreeError(err);
     }
 
     pub fn nextDefinition(iter: *BTree.Iterator) PropertyIndexError!?Definition {

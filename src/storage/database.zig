@@ -3097,9 +3097,10 @@ pub const Database = struct {
     fn rebuildPropertyIndexes(self: *Self) DatabaseError!void {
         var index = if (self.property_index) |*property_index| property_index else return;
         inline for (.{ PropertyIndexEntityKind.node, PropertyIndexEntityKind.edge }) |kind| {
-            var iter = index.definitionIterator(kind) catch |err| return mapPropertyIndexError(err);
+            var iter: PropertyIndex.DefinitionIterator = undefined;
+            index.iterateDefinitions(kind, &iter) catch |err| return mapPropertyIndexError(err);
             defer iter.deinit();
-            while (PropertyIndex.nextDefinition(&iter) catch |err| return mapPropertyIndexError(err)) |definition| {
+            while (iter.next() catch |err| return mapPropertyIndexError(err)) |definition| {
                 index.clearEntries(definition) catch |err| return mapPropertyIndexError(err);
                 try self.populatePropertyIndexDefinition(definition);
             }
