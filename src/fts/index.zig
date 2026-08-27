@@ -13,6 +13,8 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 const btree = lattice.storage.btree;
 const buffer_pool = lattice.storage.buffer_pool;
 const BTree = btree.BTree;
+const scoped_tree = @import("scoped_tree.zig");
+const ScopedTree = scoped_tree.ScopedTree;
 const BufferPool = buffer_pool.BufferPool;
 const NodeId = lattice.core.types.NodeId;
 
@@ -137,14 +139,38 @@ pub const FtsIndex = struct {
         reverse_tree: ?*BTree,
         config: FtsConfig,
     ) Self {
+        return initScoped(allocator, bp, dict_tree, lengths_tree, reverse_tree, config, null);
+    }
+
+    /// Initialize an index confined to one declared scope.
+    ///
+    /// The trees are shared by every declared index, so a scope keeps each one's
+    /// terms and documents to itself. Passing null gives the unscoped index,
+    /// which is the one built before declarations existed and which still holds
+    /// whatever was handed to `indexDocument` directly.
+    pub fn initScoped(
+        allocator: Allocator,
+        bp: *BufferPool,
+        dict_tree: *BTree,
+        lengths_tree: *BTree,
+        reverse_tree: ?*BTree,
+        config: FtsConfig,
+        scope: ?[scoped_tree.PREFIX_SIZE]u8,
+    ) Self {
+        const dict_view = if (scope) |p| ScopedTree.scoped(dict_tree, p) else ScopedTree.unscoped(dict_tree);
+        const lengths_view = if (scope) |p| ScopedTree.scoped(lengths_tree, p) else ScopedTree.unscoped(lengths_tree);
+
         return Self{
             .allocator = allocator,
             .config = config,
-            .dictionary = Dictionary.init(allocator, dict_tree),
+            .dictionary = Dictionary.init(allocator, dict_view),
             .posting_store = PostingStore.init(allocator, bp),
-            .doc_lengths = DocLengthStore.init(allocator, lengths_tree),
+            .doc_lengths = DocLengthStore.init(allocator, lengths_view),
             .scorer = Bm25Scorer.init(config.bm25),
-            .reverse_index = if (reverse_tree) |rt| ReverseIndex.init(allocator, rt) else null,
+            .reverse_index = if (reverse_tree) |rt| ReverseIndex.init(
+                allocator,
+                if (scope) |p| ScopedTree.scoped(rt, p) else ScopedTree.unscoped(rt),
+            ) else null,
             .dict_tree = dict_tree,
             .lengths_tree = lengths_tree,
             .reverse_tree = reverse_tree,

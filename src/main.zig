@@ -50,6 +50,7 @@ pub const fts = struct {
     pub const scorer = @import("fts/scorer.zig");
     pub const index = @import("fts/index.zig");
     pub const catalog = @import("fts/catalog.zig");
+    pub const scoped_tree = @import("fts/scoped_tree.zig");
     pub const stemmer = @import("fts/stemmer.zig");
     pub const fuzzy = @import("fts/fuzzy.zig");
     pub const prefix = @import("fts/prefix.zig");

@@ -13,6 +13,7 @@ const Allocator = std.mem.Allocator;
 
 const btree = lattice.storage.btree;
 const BTree = btree.BTree;
+const ScopedTree = @import("scoped_tree.zig").ScopedTree;
 const BTreeError = btree.BTreeError;
 const PageId = lattice.core.types.PageId;
 
@@ -71,13 +72,13 @@ pub const DictionaryEntry = extern struct {
 /// Term dictionary manager
 pub const Dictionary = struct {
     allocator: Allocator,
-    tree: *BTree,
+    tree: ScopedTree,
     next_token_id: TokenId,
 
     const Self = @This();
 
     /// Initialize dictionary with a B+Tree
-    pub fn init(allocator: Allocator, tree: *BTree) Self {
+    pub fn init(allocator: Allocator, tree: ScopedTree) Self {
         return Self{
             .allocator = allocator,
             .tree = tree,
@@ -232,7 +233,10 @@ pub const Dictionary = struct {
 
     /// Iterator over all dictionary entries
     pub const DictionaryIterator = struct {
-        tree_iter: BTree.Iterator,
+        /// Owns its bounds. The tree's iterator compares against the end key on
+        /// every step, so a copy of `inner` alone would be left pointing at a
+        /// buffer that died with the call that built it.
+        scoped_iter: ScopedTree.Iterator,
 
         const IterSelf = @This();
 
@@ -244,7 +248,7 @@ pub const Dictionary = struct {
 
         /// Get next entry from dictionary
         pub fn next(self: *IterSelf) DictionaryError!?Item {
-            const tree_item = self.tree_iter.next() catch |err| {
+            const tree_item = self.scoped_iter.next() catch |err| {
                 return mapBTreeError(err);
             };
 
@@ -263,20 +267,20 @@ pub const Dictionary = struct {
 
         /// Clean up iterator resources
         pub fn deinit(self: *IterSelf) void {
-            self.tree_iter.deinit();
+            self.scoped_iter.deinit();
         }
     };
 
     /// Create an iterator over all dictionary entries
     /// Iterator must be deinit'd when done
     pub fn iterate(self: *Self) DictionaryError!DictionaryIterator {
-        const tree_iter = self.tree.range(null, null) catch |err| {
+        // For a scoped view this walks only this index's terms, which is what
+        // makes iterating a dictionary mean one index rather than all of them.
+        var iter = DictionaryIterator{ .scoped_iter = undefined };
+        self.tree.iterateAll(&iter.scoped_iter) catch |err| {
             return mapBTreeError(err);
         };
-
-        return DictionaryIterator{
-            .tree_iter = tree_iter,
-        };
+        return iter;
     }
 
     /// Create an iterator over dictionary entries in a key range
@@ -287,14 +291,13 @@ pub const Dictionary = struct {
         start_key: ?[]const u8,
         end_key: ?[]const u8,
     ) DictionaryError!DictionaryIterator {
-        const tree_iter = self.tree.range(start_key, end_key) catch |err| {
+        var iter = DictionaryIterator{ .scoped_iter = undefined };
+        self.tree.rangeOwned(start_key, end_key, &iter.scoped_iter) catch |err| {
             return mapBTreeError(err);
         };
-
-        return DictionaryIterator{
-            .tree_iter = tree_iter,
-        };
+        return iter;
     }
+
 };
 
 /// Map B+Tree errors to Dictionary errors
@@ -351,7 +354,7 @@ test "dictionary basic operations" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var dict = Dictionary.init(allocator, &tree);
+    var dict = Dictionary.init(allocator, ScopedTree.unscoped(&tree));
 
     // Get or create tokens
     const id1 = try dict.getOrCreate("hello");
@@ -398,7 +401,7 @@ test "dictionary doc freq operations" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var dict = Dictionary.init(allocator, &tree);
+    var dict = Dictionary.init(allocator, ScopedTree.unscoped(&tree));
 
     // Create a token
     _ = try dict.getOrCreate("test");

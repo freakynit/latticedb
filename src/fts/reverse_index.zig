@@ -14,6 +14,7 @@ const ArrayList = std.ArrayList;
 
 const btree = lattice.storage.btree;
 const BTree = btree.BTree;
+const ScopedTree = @import("scoped_tree.zig").ScopedTree;
 const BTreeError = btree.BTreeError;
 const NodeId = lattice.core.types.NodeId;
 
@@ -42,12 +43,12 @@ const MAX_VALUE_SIZE: usize = 32768; // 32KB max per document
 /// Reverse index for document term tracking
 pub const ReverseIndex = struct {
     allocator: Allocator,
-    tree: *BTree,
+    tree: ScopedTree,
 
     const Self = @This();
 
     /// Initialize reverse index with a B+Tree
-    pub fn init(allocator: Allocator, tree: *BTree) Self {
+    pub fn init(allocator: Allocator, tree: ScopedTree) Self {
         return Self{
             .allocator = allocator,
             .tree = tree,
@@ -250,7 +251,7 @@ test "reverse index basic operations" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var ri = ReverseIndex.init(allocator, &tree);
+    var ri = ReverseIndex.init(allocator, ScopedTree.unscoped(&tree));
 
     // Store terms for a document
     const doc_id: DocId = 42;
@@ -302,7 +303,7 @@ test "reverse index overwrite" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var ri = ReverseIndex.init(allocator, &tree);
+    var ri = ReverseIndex.init(allocator, ScopedTree.unscoped(&tree));
 
     const doc_id: DocId = 100;
 

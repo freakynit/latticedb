@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 
 const btree = lattice.storage.btree;
 const BTree = btree.BTree;
+const ScopedTree = @import("scoped_tree.zig").ScopedTree;
 const BTreeError = btree.BTreeError;
 const NodeId = lattice.core.types.NodeId;
 
@@ -76,7 +77,7 @@ const DocLengthEntry = extern struct {
 /// Document length storage (DocId -> length)
 pub const DocLengthStore = struct {
     allocator: Allocator,
-    tree: *BTree,
+    tree: ScopedTree,
     stats: DocStats,
 
     const Self = @This();
@@ -101,7 +102,7 @@ pub const DocLengthStore = struct {
     /// score after a reopen was computed against an empty corpus: the inverse
     /// document frequency had no document count to work from and the length
     /// normalisation had no average to compare against.
-    pub fn init(allocator: Allocator, tree: *BTree) Self {
+    pub fn init(allocator: Allocator, tree: ScopedTree) Self {
         var self = Self{
             .allocator = allocator,
             .tree = tree,
@@ -397,7 +398,7 @@ test "bm25 score calculation" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var doc_lengths = DocLengthStore.init(allocator, &tree);
+    var doc_lengths = DocLengthStore.init(allocator, ScopedTree.unscoped(&tree));
 
     // Add some documents
     try doc_lengths.setLength(1, 100); // Doc 1: 100 tokens
@@ -450,7 +451,7 @@ test "doc length store operations" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var store = DocLengthStore.init(allocator, &tree);
+    var store = DocLengthStore.init(allocator, ScopedTree.unscoped(&tree));
 
     // Initially empty
     try std.testing.expectEqual(@as(u64, 0), store.stats.total_docs);

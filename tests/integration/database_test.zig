@@ -16,6 +16,7 @@ const DatabaseConfig = lattice.storage.database.DatabaseConfig;
 const OpenOptions = lattice.storage.database.OpenOptions;
 const PropertyValue = lattice.core.types.PropertyValue;
 const EdgeError = lattice.graph.edge.EdgeError;
+const ScopedTree = lattice.fts.scoped_tree.ScopedTree;
 
 /// Plan `cypher` against `db` and report which scan the planner chose.
 ///
@@ -4787,4 +4788,82 @@ test "database: a disjunction of full-text matches finds either side" {
     );
     defer r.deinit();
     try std.testing.expectEqual(@as(usize, 2), r.rowCount());
+}
+
+test "database: scoped full-text views stay out of each other's way" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    // Borrow a real tree from the open database.
+    const tree = &db.fts_dict_tree;
+
+    const title = ScopedTree.scoped(tree, [_]u8{ 0, 3, 0, 1 });
+    const body = ScopedTree.scoped(tree, [_]u8{ 0, 3, 0, 2 });
+
+    try title.insert("bread", "T1");
+    try title.insert("cake", "T2");
+    try body.insert("bread", "B1");
+
+    // The same term in two indexes resolves to two different entries.
+    const from_title = (try title.get("bread")).?;
+    defer title.freeValue(from_title);
+    try std.testing.expectEqualStrings("T1", from_title);
+
+    const from_body = (try body.get("bread")).?;
+    defer body.freeValue(from_body);
+    try std.testing.expectEqualStrings("B1", from_body);
+
+    // A term in one index is invisible to the other.
+    try std.testing.expect((try body.get("cake")) == null);
+    try std.testing.expect(try title.contains("cake"));
+
+    // Iterating an index sees only its own entries.
+    var count: usize = 0;
+    var it: ScopedTree.Iterator = undefined;
+    try title.iterateAll(&it);
+    while (try it.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 2), count);
+
+    var body_count: usize = 0;
+    var body_it: ScopedTree.Iterator = undefined;
+    try body.iterateAll(&body_it);
+    while (try body_it.next()) |_| body_count += 1;
+    try std.testing.expectEqual(@as(usize, 1), body_count);
+
+    // Deleting from one leaves the other alone.
+    try title.delete("bread");
+    try std.testing.expect((try title.get("bread")) == null);
+    const still_there = (try body.get("bread")).?;
+    defer body.freeValue(still_there);
+    try std.testing.expectEqualStrings("B1", still_there);
+
+}
+
+test "database: a full-text index whose prefix ends in 0xff iterates completely" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    const tree = &db.fts_dict_tree;
+    // The carry case: a naive range end would stop short and lose entries.
+    const edge = ScopedTree.scoped(tree, [_]u8{ 0, 3, 0, 0xFF });
+    const next = ScopedTree.scoped(tree, [_]u8{ 0, 3, 1, 0x00 });
+
+    try edge.insert("aaa", "x");
+    try edge.insert("zzz", "y");
+    try next.insert("aaa", "other");
+
+    var count: usize = 0;
+    var it: ScopedTree.Iterator = undefined;
+    try edge.iterateAll(&it);
+    while (try it.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 2), count);
+
 }
