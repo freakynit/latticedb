@@ -195,6 +195,28 @@ def _update_ts_index(text: str, version: str, path: Path) -> str:
     )
 
 
+def _update_website(text: str, version: str, path: Path) -> str:
+    """Point the marketing site at the current release.
+
+    The site is deployed from its own directory and only when that directory
+    changes, so nothing forces it to keep up. Left untracked it drifted four
+    releases behind while every workflow reported success, which is the failure
+    mode worth removing rather than remembering.
+    """
+    text = _replace_exactly_one(
+        text,
+        r"(<h2>What's new in )[0-9]+\.[0-9]+\.[0-9]+(</h2>)",
+        rf"\g<1>{version}\g<2>",
+        path,
+    )
+    return _replace_exactly_one(
+        text,
+        r"(docs/release_notes_)[0-9]+\.[0-9]+\.[0-9]+(\.md)",
+        rf"\g<1>{version}\g<2>",
+        path,
+    )
+
+
 def _update_book_api_c(text: str, version: str, path: Path) -> str:
     return _replace_exactly_one(
         text,
@@ -662,6 +684,19 @@ def _collect_version_observations(
         VersionObservation("Docs C API version example", book_api_c_path, docs_c_example_version)
     )
 
+    # Marketing site
+    website_path = root / "website/index.html"
+    website = _load(website_path)
+    website_version = _extract_exactly_one(
+        website,
+        r"<h2>What's new in ([0-9]+\.[0-9]+\.[0-9]+)</h2>",
+        website_path,
+        "website release heading",
+    )
+    observations.append(
+        VersionObservation("Website release heading", website_path, website_version)
+    )
+
     for observation in observations:
         if not SEMVER_RE.match(observation.value):
             problems.append(
@@ -790,6 +825,9 @@ def _compute_changes(root: Path, version: str) -> Tuple[FileChange, ...]:
         ),
         root / "book/src/api/c.md": lambda t: _update_book_api_c(
             t, version, root / "book/src/api/c.md"
+        ),
+        root / "website/index.html": lambda t: _update_website(
+            t, version, root / "website/index.html"
         ),
     }
 

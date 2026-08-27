@@ -692,6 +692,33 @@ footer .footer-links {
           <li>Built-in graph changefeed with large-value summaries</li>
         </ul>
       </div>
+      <div class="feature-card">
+        <h3>Backup and Restore</h3>
+        <ul>
+          <li>Copy a database without closing it</li>
+          <li>Ship changes continuously to a directory or a mounted volume</li>
+          <li>Restore to a point in time, not just to the last snapshot</li>
+          <li>Restoring replays through the same recovery path as a crash</li>
+        </ul>
+      </div>
+      <div class="feature-card">
+        <h3>Portable Databases</h3>
+        <ul>
+          <li>Serialize a whole database to bytes and open one from bytes</li>
+          <li>A database per case or tenant, kept in object storage</li>
+          <li>Open <code>:memory:</code> and never touch the disk</li>
+          <li>Cheap because a database is one file, so serializing is reading it</li>
+        </ul>
+      </div>
+      <div class="feature-card">
+        <h3>Safe by Default</h3>
+        <ul>
+          <li>One process at a time, enforced with a lock on the file</li>
+          <li>A second writer is refused rather than left to corrupt the data</li>
+          <li>The write-ahead log is checkpointed as it grows, not only on close</li>
+          <li>Every write goes through the log, including plain Cypher</li>
+        </ul>
+      </div>
     </div>
   </div>
 </section>
@@ -699,44 +726,43 @@ footer .footer-links {
 <!-- Release Notes -->
 <section class="release-notes">
   <div class="container">
-    <h2>What's new in 0.10.0</h2>
-    <p class="caption">Durable property indexes the query planner can use, stricter write ownership, and storage that gives space back.</p>
+    <h2>What's new in 0.14.0</h2>
+    <p class="caption">Databases you can hand around as bytes, databases that never touch a disk, and a query that used to sort the wrong rows.</p>
     <div class="release-grid">
       <div class="release-card">
-        <h3>Property Indexes</h3>
+        <h3>Databases as Bytes</h3>
         <ul>
-          <li>Durable node and edge property equality indexes</li>
-          <li>The Cypher planner uses them for inline and <code>WHERE</code> equality</li>
-          <li>Maintained by direct and transactional writes, rebuilt on recovery</li>
-          <li>Indexed lookup never silently falls back to a scan</li>
+          <li><code>serialize</code> hands back the whole database; <code>deserialize</code> opens one</li>
+          <li>Keep many small databases in S3 or Azure Blob Storage</li>
+          <li>Pending writes are folded in, so the bytes need no log beside them</li>
+          <li>Your own client does the transfer, with your credentials</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Write Ownership</h3>
+        <h3>In-Memory Databases</h3>
         <ul>
-          <li>One active read-write transaction per handle</li>
-          <li>A second writer gets a contention error instead of racing</li>
-          <li>Read-only transactions may stay open alongside it</li>
-          <li>Close ownership is consistent across every binding</li>
+          <li>Open <code>:memory:</code> and nothing touches the disk</li>
+          <li>Transactions, the write-ahead log, and serialization all work</li>
+          <li>Load without a second copy of the bytes in Python and TypeScript</li>
+          <li>A 100 KB database costs about 360 KB in memory</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Reclaiming Space</h3>
+        <h3>Sorting by an Aggregate</h3>
         <ul>
-          <li>B+Tree deletes rebalance through every internal level</li>
-          <li><code>lattice compact</code> truncates free pages from the file tail</li>
-          <li>Vector replacement and HNSW rebuild reuse storage</li>
-          <li>Corrupt persisted vector chains are rejected, not read</li>
+          <li><code>ORDER BY</code> over <code>count()</code> returned the wrong rows, with no error</li>
+          <li>Sorting now happens after aggregation, not before it</li>
+          <li><code>LIMIT</code> takes the genuine top N</li>
+          <li>Ordering by a column that is not projected is refused</li>
         </ul>
       </div>
     </div>
     <p class="release-meta">
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/09_graph_storage.md">Read the graph storage notes</a>
+      <a href="https://docs.latticedb.org/guides/backup-and-replication">Backup, replication, and object storage</a>
       <span aria-hidden="true"> | </span>
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.10.0.md">Read the 0.10.0 release notes</a>
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.14.0.md">Read the 0.14.0 release notes</a>
     </p>
-  </div>
-</section>
+  </section>
 
 <!-- Example Graph -->
 <section class="example-graph">
