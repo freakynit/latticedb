@@ -18,6 +18,12 @@
 - [LatticeDB vs Neo4j](./comparisons/vs-neo4j.md)
 - [LatticeDB vs Vector Databases](./comparisons/vs-vector-databases.md)
 
+# Configuration
+
+- [Opening a Database](./configuration/opening.md)
+- [Storage Modes](./configuration/storage-modes.md)
+- [Durability and the Log](./configuration/durability.md)
+
 # Guides
 
 - [Building a RAG System](./guides/rag-system.md)
