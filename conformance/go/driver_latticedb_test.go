@@ -79,6 +79,14 @@ func (db *latticeDB) VectorSearch(vector []float32, opts VectorSearchOptions) ([
 	return out, nil
 }
 
+func (db *latticeDB) CreateNodeFTSIndex(label, property string) error {
+	return db.db.CreateNodeFTSIndex(label, property)
+}
+
+func (db *latticeDB) HasNodeFTSIndex(label, property string) (bool, error) {
+	return db.db.HasNodeFTSIndex(label, property)
+}
+
 func (db *latticeDB) FTSSearch(query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
 	results, err := db.db.FTSSearch(query, latticedb.FTSSearchOptions{
 		Limit:         opts.Limit,

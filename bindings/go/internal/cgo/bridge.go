@@ -331,6 +331,59 @@ func (db *DB) DropNodePropertyIndex(label, property string) error {
 	)))
 }
 
+func (db *DB) CreateNodeFTSIndex(label, property string) error {
+	if db == nil || db.ptr == nil {
+		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	cLabel := C.CString(label)
+	defer C.free(unsafe.Pointer(cLabel))
+	cProperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cProperty))
+
+	return errorFromCode(ErrorCode(C.lattice_node_fts_index_create(
+		db.ptr,
+		cLabel,
+		cProperty,
+	)))
+}
+
+func (db *DB) DropNodeFTSIndex(label, property string) error {
+	if db == nil || db.ptr == nil {
+		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	cLabel := C.CString(label)
+	defer C.free(unsafe.Pointer(cLabel))
+	cProperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cProperty))
+
+	return errorFromCode(ErrorCode(C.lattice_node_fts_index_drop(
+		db.ptr,
+		cLabel,
+		cProperty,
+	)))
+}
+
+func (db *DB) HasNodeFTSIndex(label, property string) (bool, error) {
+	if db == nil || db.ptr == nil {
+		return false, &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	cLabel := C.CString(label)
+	defer C.free(unsafe.Pointer(cLabel))
+	cProperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cProperty))
+
+	var exists C.bool
+	if err := errorFromCode(ErrorCode(C.lattice_node_fts_index_exists(
+		db.ptr,
+		cLabel,
+		cProperty,
+		&exists,
+	))); err != nil {
+		return false, err
+	}
+	return bool(exists), nil
+}
+
 func (db *DB) CreateEdgePropertyIndex(edgeType, property string) error {
 	if db == nil || db.ptr == nil {
 		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}

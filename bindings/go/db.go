@@ -259,6 +259,39 @@ func (db *DB) DropNodePropertyIndex(label, property string) error {
 	return wrapError(db.raw.DropNodePropertyIndex(label, property))
 }
 
+// CreateNodeFTSIndex declares a full-text index over one node label/property
+// pair and indexes the text already stored in that property.
+//
+// The property holds the text, and only string properties are indexed. Writes
+// maintain the index from then on.
+//
+// A Cypher `d.property @@ "query"` searches the index declared for that label
+// and property, and fails when none is declared rather than returning no rows.
+func (db *DB) CreateNodeFTSIndex(label, property string) error {
+	if db == nil || db.raw == nil {
+		return ErrDatabaseClosed
+	}
+	return wrapError(db.raw.CreateNodeFTSIndex(label, property))
+}
+
+// DropNodeFTSIndex removes a declared full-text index and everything it stored.
+func (db *DB) DropNodeFTSIndex(label, property string) error {
+	if db == nil || db.raw == nil {
+		return ErrDatabaseClosed
+	}
+	return wrapError(db.raw.DropNodeFTSIndex(label, property))
+}
+
+// HasNodeFTSIndex reports whether a full-text index is declared for a label and
+// property.
+func (db *DB) HasNodeFTSIndex(label, property string) (bool, error) {
+	if db == nil || db.raw == nil {
+		return false, ErrDatabaseClosed
+	}
+	ok, err := db.raw.HasNodeFTSIndex(label, property)
+	return ok, wrapError(err)
+}
+
 // CreateEdgePropertyIndex creates an explicit equality index for an edge
 // type/property pair and indexes existing matching edges.
 func (db *DB) CreateEdgePropertyIndex(edgeType, property string) error {

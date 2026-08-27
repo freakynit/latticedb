@@ -372,6 +372,37 @@ lattice_error lattice_node_property_index_drop(
     const char* property
 );
 
+/* Create or drop a full-text index over one node label/property pair.
+ *
+ * The property holds the text. Creation reads it from every node already
+ * carrying the label, and writes maintain it from then on. Only string
+ * properties are indexed.
+ *
+ * `d.property @@ "query"` searches the index declared for that label and
+ * property, and fails when none is declared rather than returning no rows,
+ * because no rows is indistinguishable from a search that found nothing.
+ *
+ * These schema operations fail with LATTICE_ERROR_LOCK_TIMEOUT while a write
+ * transaction is active. */
+lattice_error lattice_node_fts_index_create(
+    lattice_database* db,
+    const char* label,
+    const char* property
+);
+
+lattice_error lattice_node_fts_index_drop(
+    lattice_database* db,
+    const char* label,
+    const char* property
+);
+
+lattice_error lattice_node_fts_index_exists(
+    lattice_database* db,
+    const char* label,
+    const char* property,
+    bool* exists_out
+);
+
 /* Find visible node IDs through an explicit label/property equality index.
  * Returns LATTICE_ERROR_UNSUPPORTED if the requested index does not exist.
  * The caller owns *node_ids_out and must use lattice_free_node_ids(). */

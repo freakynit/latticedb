@@ -85,6 +85,8 @@ type Database interface {
 	Query(cypher string, params map[string]Value) (QueryResult, error)
 	VectorSearch(vector []float32, opts VectorSearchOptions) ([]VectorSearchResult, error)
 	FTSSearch(query string, opts FTSSearchOptions) ([]FTSSearchResult, error)
+	CreateNodeFTSIndex(label, property string) error
+	HasNodeFTSIndex(label, property string) (bool, error)
 	CacheClear() error
 	CacheStats() (QueryCacheStats, error)
 }
@@ -582,6 +584,18 @@ func TestConformanceSearchSemanticsAndQueryCache(t *testing.T) {
 		t.Fatalf("unexpected initial cache stats: %#v", initialStats)
 	}
 
+	// `d.text @@ ...` searches the index declared for Document.text. Declaring it
+	// before the writes means maintenance covers them as they happen. The
+	// FTSIndex calls below feed the older per-node index that db.FTSSearch still
+	// reads; the two are separate stores.
+	if err := db.CreateNodeFTSIndex("Document", "text"); err != nil {
+		t.Fatalf("declare fts index: %v", err)
+	}
+	declared, err := db.HasNodeFTSIndex("Document", "text")
+	if err != nil || !declared {
+		t.Fatalf("expected Document.text index to be declared: %v", err)
+	}
+
 	var nearDocID uint64
 	var farDocID uint64
 	err = db.Update(func(tx Tx) error {
@@ -610,6 +624,9 @@ func TestConformanceSearchSemanticsAndQueryCache(t *testing.T) {
 		if err := tx.SetVector(docNear.ID, "embedding", []float32{1.0, 0.0, 0.0, 0.0}); err != nil {
 			return err
 		}
+		if err := tx.SetProperty(docNear.ID, "text", "graph databases and traversal"); err != nil {
+			return err
+		}
 		if err := tx.FTSIndex(docNear.ID, "graph databases and traversal"); err != nil {
 			return err
 		}
@@ -623,6 +640,9 @@ func TestConformanceSearchSemanticsAndQueryCache(t *testing.T) {
 			return err
 		}
 		if err := tx.SetVector(docFar.ID, "embedding", []float32{0.0, 1.0, 0.0, 0.0}); err != nil {
+			return err
+		}
+		if err := tx.SetProperty(docFar.ID, "text", "cooking recipes and ingredients"); err != nil {
 			return err
 		}
 		if err := tx.FTSIndex(docFar.ID, "cooking recipes and ingredients"); err != nil {
