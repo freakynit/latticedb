@@ -68,3 +68,5 @@ dist/release/
 # while somebody is chasing that bug.
 :memory:
 :memory:-wal
+.zig-cache-global/
+.zig-global-cache/
