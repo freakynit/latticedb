@@ -4867,3 +4867,228 @@ test "database: a full-text index whose prefix ends in 0xff iterates completely"
     try std.testing.expectEqual(@as(usize, 2), count);
 
 }
+
+/// Free what `ftsSearchIndex` returned.
+///
+/// The results are a plain allocated slice, so the test allocator will complain
+/// loudly if one goes unfreed, which is the point.
+fn freeFtsResults(allocator: std.mem.Allocator, results: []lattice.ScoredDoc) void {
+    if (results.len == 0) return;
+    allocator.free(results);
+}
+
+fn ftsContains(results: []lattice.ScoredDoc, doc_id: u64) bool {
+    for (results) |result| {
+        if (result.doc_id == doc_id) return true;
+    }
+    return false;
+}
+
+test "database: declaring a full-text index reads the property off the nodes already there" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    const sourdough = try db.createNode(null, &[_][]const u8{"Recipe"});
+    try db.setNodeProperty(null, sourdough, "title", .{ .string_val = "sourdough bread" });
+    const cake = try db.createNode(null, &[_][]const u8{"Recipe"});
+    try db.setNodeProperty(null, cake, "title", .{ .string_val = "chocolate cake" });
+
+    // Nothing was indexed as it was written, because nothing was declared yet.
+    try db.createNodeFtsIndex("Recipe", "title");
+
+    const found = try db.ftsSearchIndex(.node, "Recipe", "title", "bread", 10);
+    defer freeFtsResults(allocator, found);
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+    try std.testing.expectEqual(sourdough, found[0].doc_id);
+
+    const cake_hits = try db.ftsSearchIndex(.node, "Recipe", "title", "chocolate", 10);
+    defer freeFtsResults(allocator, cake_hits);
+    try std.testing.expectEqual(@as(usize, 1), cake_hits.len);
+    try std.testing.expectEqual(cake, cake_hits[0].doc_id);
+}
+
+test "database: a declared index follows writes without being asked" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Recipe", "title");
+
+    // Created after the declaration, so only maintenance can have indexed it.
+    const node = try db.createNode(null, &[_][]const u8{"Recipe"});
+    try db.setNodeProperty(null, node, "title", .{ .string_val = "rye bread" });
+
+    {
+        const found = try db.ftsSearchIndex(.node, "Recipe", "title", "rye", 10);
+        defer freeFtsResults(allocator, found);
+        try std.testing.expectEqual(@as(usize, 1), found.len);
+    }
+
+    // An update has to take the old text out as well as put the new text in,
+    // otherwise the index keeps answering for a value the database no longer
+    // holds.
+    try db.setNodeProperty(null, node, "title", .{ .string_val = "focaccia" });
+    {
+        const stale = try db.ftsSearchIndex(.node, "Recipe", "title", "rye", 10);
+        defer freeFtsResults(allocator, stale);
+        try std.testing.expectEqual(@as(usize, 0), stale.len);
+
+        const fresh = try db.ftsSearchIndex(.node, "Recipe", "title", "focaccia", 10);
+        defer freeFtsResults(allocator, fresh);
+        try std.testing.expectEqual(@as(usize, 1), fresh.len);
+    }
+
+    try db.deleteNode(null, node);
+    {
+        const gone = try db.ftsSearchIndex(.node, "Recipe", "title", "focaccia", 10);
+        defer freeFtsResults(allocator, gone);
+        try std.testing.expectEqual(@as(usize, 0), gone.len);
+    }
+}
+
+test "database: two properties of one label are two separate indexes" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+    try db.createNodeFtsIndex("Doc", "body");
+
+    const doc = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, doc, "title", .{ .string_val = "bread" });
+    try db.setNodeProperty(null, doc, "body", .{ .string_val = "cake" });
+
+    // This is the whole point of the feature: a term in the body must not be
+    // found by a search of the title.
+    {
+        const in_title = try db.ftsSearchIndex(.node, "Doc", "title", "cake", 10);
+        defer freeFtsResults(allocator, in_title);
+        try std.testing.expectEqual(@as(usize, 0), in_title.len);
+    }
+    {
+        const in_body = try db.ftsSearchIndex(.node, "Doc", "body", "cake", 10);
+        defer freeFtsResults(allocator, in_body);
+        try std.testing.expectEqual(@as(usize, 1), in_body.len);
+        try std.testing.expectEqual(doc, in_body[0].doc_id);
+    }
+    {
+        const title_term = try db.ftsSearchIndex(.node, "Doc", "title", "bread", 10);
+        defer freeFtsResults(allocator, title_term);
+        try std.testing.expectEqual(@as(usize, 1), title_term.len);
+    }
+}
+
+test "database: dropping a full-text index takes its terms with it" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+    const doc = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, doc, "title", .{ .string_val = "bread" });
+
+    try std.testing.expect(try db.hasNodeFtsIndex("Doc", "title"));
+    try db.dropNodeFtsIndex("Doc", "title");
+    try std.testing.expect(!(try db.hasNodeFtsIndex("Doc", "title")));
+
+    // Searching a dropped index is a missing index, not an empty result.
+    try std.testing.expectError(
+        error.MissingIndex,
+        db.ftsSearchIndex(.node, "Doc", "title", "bread", 10),
+    );
+
+    // Redeclaring lands on the same scope, so anything the drop left behind would
+    // show up here as a document that was never reindexed. Removing the property
+    // first makes that unambiguous: a hit now could only be a stale entry.
+    try db.removeNodeProperty(null, doc, "title");
+    try db.createNodeFtsIndex("Doc", "title");
+    const after = try db.ftsSearchIndex(.node, "Doc", "title", "bread", 10);
+    defer freeFtsResults(allocator, after);
+    try std.testing.expectEqual(@as(usize, 0), after.len);
+}
+
+test "database: a label a node does not carry is not indexed for it" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Recipe", "title");
+
+    const note = try db.createNode(null, &[_][]const u8{"Note"});
+    try db.setNodeProperty(null, note, "title", .{ .string_val = "bread" });
+
+    const found = try db.ftsSearchIndex(.node, "Recipe", "title", "bread", 10);
+    defer freeFtsResults(allocator, found);
+    try std.testing.expectEqual(@as(usize, 0), found.len);
+}
+
+test "database: a property that is not text is left alone" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Reading", "value");
+
+    const reading = try db.createNode(null, &[_][]const u8{"Reading"});
+    try db.setNodeProperty(null, reading, "value", .{ .int_val = 42 });
+
+    // An integer is not text. Indexing some rendering of it would be a different
+    // feature, and doing half of it silently would be worse than doing none.
+    const found = try db.ftsSearchIndex(.node, "Reading", "value", "42", 10);
+    defer freeFtsResults(allocator, found);
+    try std.testing.expectEqual(@as(usize, 0), found.len);
+}
+
+test "database: declared full-text indexes survive a reopen" {
+    const allocator = std.testing.allocator;
+    const db_path = "/tmp/lattice_fts_declared_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(db_path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(db_path ++ "-wal") catch {};
+
+    var indexed_id: u64 = 0;
+    {
+        const db = try Database.open(allocator, db_path, .{
+            .create = true,
+            .config = .{ .enable_fts = true, .enable_vector = false },
+        });
+        defer db.close();
+
+        try db.createNodeFtsIndex("Recipe", "title");
+        indexed_id = try db.createNode(null, &[_][]const u8{"Recipe"});
+        try db.setNodeProperty(null, indexed_id, "title", .{ .string_val = "sourdough bread" });
+        _ = try db.checkpoint(.full);
+    }
+
+    const db = try Database.open(allocator, db_path, .{
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try std.testing.expect(try db.hasNodeFtsIndex("Recipe", "title"));
+
+    const found = try db.ftsSearchIndex(.node, "Recipe", "title", "sourdough", 10);
+    defer freeFtsResults(allocator, found);
+    try std.testing.expectEqual(@as(usize, 1), found.len);
+    try std.testing.expect(ftsContains(found, indexed_id));
+}

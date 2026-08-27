@@ -96,6 +96,11 @@ const FtsError = fts_mod.FtsError;
 const fuzzy_mod = lattice.fts.fuzzy;
 
 const scorer_mod = lattice.fts.scorer;
+const fts_catalog_mod = lattice.fts.catalog;
+const FtsCatalog = fts_catalog_mod.FtsCatalog;
+const FtsCatalogError = fts_catalog_mod.FtsCatalogError;
+const FtsDefinition = fts_catalog_mod.FtsDefinition;
+const FtsEntityKind = fts_catalog_mod.FtsEntityKind;
 pub const FtsSearchResult = scorer_mod.ScoredDoc;
 
 // Vector storage and HNSW
@@ -468,6 +473,25 @@ fn mapPropertyIndexError(err: PropertyIndexError) DatabaseError {
     };
 }
 
+fn mapFtsCatalogError(err: FtsCatalogError) DatabaseError {
+    return switch (err) {
+        FtsCatalogError.NotFound => DatabaseError.MissingIndex,
+        FtsCatalogError.AlreadyExists => DatabaseError.AlreadyExists,
+        FtsCatalogError.OutOfMemory => DatabaseError.OutOfMemory,
+        FtsCatalogError.InvalidData => DatabaseError.InvalidDatabase,
+        FtsCatalogError.IoError => DatabaseError.IoError,
+    };
+}
+
+fn mapFtsError(err: FtsError) DatabaseError {
+    return switch (err) {
+        FtsError.NotFound => DatabaseError.NotFound,
+        FtsError.OutOfMemory => DatabaseError.OutOfMemory,
+        FtsError.InvalidQuery => DatabaseError.InvalidArgument,
+        else => DatabaseError.IoError,
+    };
+}
+
 fn shouldResetWalForNewDatabase(err: WalError) bool {
     return switch (err) {
         WalError.InvalidMagic,
@@ -737,6 +761,21 @@ fn findPropertyById(
     return null;
 }
 
+/// The text a full-text definition would index on an entity, if there is any.
+///
+/// The property has to be present and hold a string. A missing property, a
+/// number, or a list is not text and is left out rather than rendered into some
+/// string form of itself: a search for `42` matching an integer property would be
+/// a different feature with different rules, and quietly doing half of it here
+/// would make the results hard to explain.
+fn ftsTextOf(definition: FtsDefinition, properties: []const node_mod.Property) ?[]const u8 {
+    const property = findPropertyById(properties, definition.property_id) orelse return null;
+    return switch (property.value) {
+        .string_val => |text| text,
+        else => null,
+    };
+}
+
 /// Frames an in-memory database keeps beyond the size of the database itself.
 ///
 /// This is a floor rather than a tuning knob: a pool with nowhere to put the next
@@ -839,6 +878,12 @@ pub const Database = struct {
 
     // Indexes
     fts_index: ?FtsIndex,
+    /// Whether any full-text index has been declared.
+    ///
+    /// Every write has to ask what the declared indexes want, and the answer is
+    /// almost always "there are none". Keeping it here turns that question into a
+    /// boolean rather than a catalog scan on the write path.
+    fts_declared: bool = false,
     vector_storage: ?VectorStorage,
     hnsw_index: ?HnswIndex,
 
@@ -1056,6 +1101,7 @@ pub const Database = struct {
             // Persist recovered state if any redo operations were applied
             if (stats.redo_operations > 0) {
                 try self.rebuildPropertyIndexes();
+                try self.rebuildFtsIndexes();
                 self.saveTreeRoots() catch {};
             }
         }
@@ -1072,6 +1118,8 @@ pub const Database = struct {
                 options.config.fts_config,
             );
         }
+
+        self.fts_declared = self.ftsDeclarationsExist();
 
         // 8b. Initialize Vector Storage (optional)
         // (vector_storage and hnsw_index already initialized to null above)
@@ -2326,6 +2374,7 @@ pub const Database = struct {
             index.removeNode(node_id, old_labels, old_properties) catch |err| return mapPropertyIndexError(err);
             index.indexNode(node_id, new_labels, new_properties) catch |err| return mapPropertyIndexError(err);
         }
+        try self.ftsReplaceNode(node_id, old_labels, old_properties, new_labels, new_properties);
     }
 
     fn replaceEdgePropertyIndex(
@@ -2340,6 +2389,7 @@ pub const Database = struct {
             index.removeEdge(edge_id, old_type, old_properties) catch |err| return mapPropertyIndexError(err);
             index.indexEdge(edge_id, new_type, new_properties) catch |err| return mapPropertyIndexError(err);
         }
+        try self.ftsReplaceEdge(edge_id, old_type, old_properties, new_type, new_properties, true, true);
     }
 
     fn applyNodeState(self: *Self, node_id: NodeId, state: TxnNodeState) DatabaseError!void {
@@ -2361,6 +2411,7 @@ pub const Database = struct {
                 if (self.property_index) |*index| {
                     index.removeNode(node_id, existing.labels, existing.properties) catch |err| return mapPropertyIndexError(err);
                 }
+                try self.ftsReplaceNode(node_id, existing.labels, existing.properties, &.{}, &.{});
             }
             return;
         }
@@ -2384,6 +2435,7 @@ pub const Database = struct {
                 index.removeNode(node_id, existing.labels, existing.properties) catch |err| return mapPropertyIndexError(err);
                 index.indexNode(node_id, state.labels, state.properties) catch |err| return mapPropertyIndexError(err);
             }
+            try self.ftsReplaceNode(node_id, existing.labels, existing.properties, state.labels, state.properties);
             return;
         }
 
@@ -2396,6 +2448,7 @@ pub const Database = struct {
         if (self.property_index) |*index| {
             index.indexNode(node_id, state.labels, state.properties) catch |err| return mapPropertyIndexError(err);
         }
+        try self.ftsReplaceNode(node_id, &.{}, &.{}, state.labels, state.properties);
     }
 
     fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState) DatabaseError!void {
@@ -2415,6 +2468,8 @@ pub const Database = struct {
                     const existing = current.?;
                     index.removeEdge(edge_id, existing.edge_type, existing.properties) catch |err| return mapPropertyIndexError(err);
                 }
+                const existing = current.?;
+                try self.ftsReplaceEdge(edge_id, existing.edge_type, existing.properties, 0, &.{}, true, false);
             }
             return;
         }
@@ -2438,6 +2493,11 @@ pub const Database = struct {
                 index.removeEdge(edge_id, existing.edge_type, existing.properties) catch |err| return mapPropertyIndexError(err);
             }
             index.indexEdge(edge_id, state.edge_type, state.properties) catch |err| return mapPropertyIndexError(err);
+        }
+        if (current) |existing| {
+            try self.ftsReplaceEdge(edge_id, existing.edge_type, existing.properties, state.edge_type, state.properties, true, true);
+        } else {
+            try self.ftsReplaceEdge(edge_id, 0, &.{}, state.edge_type, state.properties, false, true);
         }
     }
 
@@ -3169,6 +3229,332 @@ pub const Database = struct {
 
     pub fn dropEdgePropertyIndex(self: *Self, edge_type: []const u8, property: []const u8) DatabaseError!void {
         try self.dropPropertyIndex(.edge, edge_type, property);
+    }
+
+    // ========================================================================
+    // Declared full-text indexes
+    // ========================================================================
+
+    /// The declared full-text indexes.
+    ///
+    /// They live in the same catalog tree as the property indexes, under their own
+    /// kind discriminators, so there is nothing extra to create or load for them.
+    /// Null means that tree does not exist yet, which is to say nothing has ever
+    /// been declared.
+    fn ftsCatalog(self: *Self) ?FtsCatalog {
+        const tree = if (self.property_index_catalog_tree) |*t| t else return null;
+        return FtsCatalog.init(tree);
+    }
+
+    /// Whether the catalog holds any full-text declaration at all.
+    ///
+    /// Asked once when the database opens, and then kept in `fts_declared` so the
+    /// write path does not repeat it.
+    fn ftsDeclarationsExist(self: *Self) bool {
+        var catalog = self.ftsCatalog() orelse return false;
+        inline for (.{ FtsEntityKind.node, FtsEntityKind.edge }) |kind| {
+            var iter: FtsCatalog.DefinitionIterator = undefined;
+            catalog.iterate(kind, &iter) catch return false;
+            defer iter.deinit();
+            if ((iter.next() catch null) != null) return true;
+        }
+        return false;
+    }
+
+    /// An index confined to one declaration.
+    ///
+    /// Built per call rather than kept, because it holds nothing worth keeping:
+    /// the trees belong to the database and the scope is four bytes derived from
+    /// the definition. The one piece of state it does carry, the dictionary's next
+    /// token id, restarts at its first value — which is already what happens on
+    /// every reopen, and is harmless because that id is a label written into the
+    /// posting page header and never used to find anything.
+    fn ftsIndexFor(self: *Self, definition: FtsDefinition) FtsIndex {
+        return FtsIndex.initScoped(
+            self.allocator,
+            &self.buffer_pool,
+            &self.fts_dict_tree,
+            &self.fts_lengths_tree,
+            if (self.fts_reverse_tree) |*t| t else null,
+            self.config.fts_config,
+            fts_catalog_mod.scopePrefix(definition),
+        );
+    }
+
+    fn ftsDefinitionFor(
+        self: *Self,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+        create_symbols: bool,
+    ) DatabaseError!FtsDefinition {
+        const scope_id = if (create_symbols)
+            self.symbol_table.intern(scope) catch return DatabaseError.IoError
+        else
+            self.symbol_table.lookup(scope) catch |err| switch (err) {
+                symbols_mod.SymbolError.NotFound => return DatabaseError.MissingIndex,
+                else => return DatabaseError.IoError,
+            };
+        const property_id = if (create_symbols)
+            self.symbol_table.intern(property) catch return DatabaseError.IoError
+        else
+            self.symbol_table.lookup(property) catch |err| switch (err) {
+                symbols_mod.SymbolError.NotFound => return DatabaseError.MissingIndex,
+                else => return DatabaseError.IoError,
+            };
+        return .{ .kind = kind, .scope_id = scope_id, .property_id = property_id };
+    }
+
+    fn populateFtsDefinition(self: *Self, definition: FtsDefinition) DatabaseError!void {
+        var index = self.ftsIndexFor(definition);
+        switch (definition.kind) {
+            .node => {
+                const node_ids = self.label_index.getNodesByLabel(definition.scope_id) catch return DatabaseError.IoError;
+                defer self.allocator.free(node_ids);
+                for (node_ids) |node_id| {
+                    var state = (try self.readBaseNodeState(node_id)) orelse continue;
+                    defer state.deinit(self.allocator);
+                    const text = ftsTextOf(definition, state.properties) orelse continue;
+                    _ = index.indexDocument(node_id, text) catch |err| return mapFtsError(err);
+                }
+            },
+            .edge => {
+                var iter = self.edge_store.scanRefs() catch return DatabaseError.IoError;
+                defer iter.deinit();
+                while (iter.next() catch return DatabaseError.IoError) |edge_ref| {
+                    if (edge_ref.edge_type != definition.scope_id) continue;
+                    var state = (try self.readBaseEdgeState(edge_ref.id)) orelse continue;
+                    defer state.deinit(self.allocator);
+                    const text = ftsTextOf(definition, state.properties) orelse continue;
+                    _ = index.indexDocument(edge_ref.id, text) catch |err| return mapFtsError(err);
+                }
+            },
+        }
+    }
+
+    fn createFtsIndex(
+        self: *Self,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+    ) DatabaseError!void {
+        if (self.read_only) return DatabaseError.ReadOnly;
+        if (scope.len == 0 or property.len == 0) return DatabaseError.InvalidArgument;
+        if (self.active_writer_txn_id != null) return DatabaseError.TransactionConflict;
+        // Removing a document needs the reverse index to say which terms it wrote
+        // and where, and that tree exists only when full-text search is enabled.
+        // Declaring an index that could not be maintained would leave a stale term
+        // behind on the first update, which is worse than refusing here.
+        if (self.fts_reverse_tree == null) return DatabaseError.InvalidArgument;
+        try self.ensurePropertyIndexTreesForWrite();
+
+        const definition = try self.ftsDefinitionFor(kind, scope, property, true);
+        var catalog = self.ftsCatalog() orelse return DatabaseError.IoError;
+        if (catalog.has(definition) catch |err| return mapFtsCatalogError(err)) {
+            return DatabaseError.AlreadyExists;
+        }
+        try self.populateFtsDefinition(definition);
+        catalog.create(definition) catch |err| return mapFtsCatalogError(err);
+        self.fts_declared = true;
+        try self.saveTreeRoots();
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
+    }
+
+    fn dropFtsIndex(
+        self: *Self,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+    ) DatabaseError!void {
+        if (self.read_only) return DatabaseError.ReadOnly;
+        if (scope.len == 0 or property.len == 0) return DatabaseError.InvalidArgument;
+        if (self.active_writer_txn_id != null) return DatabaseError.TransactionConflict;
+        const definition = try self.ftsDefinitionFor(kind, scope, property, false);
+        var catalog = self.ftsCatalog() orelse return DatabaseError.MissingIndex;
+        catalog.drop(definition) catch |err| return mapFtsCatalogError(err);
+        try self.clearFtsDefinition(definition);
+        self.fts_declared = self.ftsDeclarationsExist();
+        try self.saveTreeRoots();
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
+    }
+
+    /// Remove everything a dropped index put in the shared trees.
+    ///
+    /// Leaving it costs space forever and, worse, redeclaring the same label and
+    /// property would land on the same scope and find the old terms still sitting
+    /// there.
+    fn clearFtsDefinition(self: *Self, definition: FtsDefinition) DatabaseError!void {
+        var index = self.ftsIndexFor(definition);
+        index.clearScope() catch |err| return mapFtsError(err);
+    }
+
+    /// Rebuild every declared index from the entities as they now stand.
+    ///
+    /// Recovery replays into the stores directly rather than through the write
+    /// path, so nothing maintained the indexes while it did. Clearing by scope
+    /// rather than walking documents matters here: an entity the redo deleted is
+    /// no longer there to walk, and its terms would otherwise stay behind and keep
+    /// matching.
+    fn rebuildFtsIndexes(self: *Self) DatabaseError!void {
+        var catalog = self.ftsCatalog() orelse return;
+        inline for (.{ FtsEntityKind.node, FtsEntityKind.edge }) |kind| {
+            var iter: FtsCatalog.DefinitionIterator = undefined;
+            catalog.iterate(kind, &iter) catch |err| return mapFtsCatalogError(err);
+            defer iter.deinit();
+            while (iter.next() catch |err| return mapFtsCatalogError(err)) |definition| {
+                try self.clearFtsDefinition(definition);
+                try self.populateFtsDefinition(definition);
+            }
+        }
+    }
+
+    fn hasFtsIndex(
+        self: *Self,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+    ) DatabaseError!bool {
+        const definition = self.ftsDefinitionFor(kind, scope, property, false) catch |err| switch (err) {
+            DatabaseError.MissingIndex => return false,
+            else => return err,
+        };
+        var catalog = self.ftsCatalog() orelse return false;
+        return catalog.has(definition) catch |err| return mapFtsCatalogError(err);
+    }
+
+    /// Search one declared index.
+    ///
+    /// Results come back scored against that index's own corpus, so a term that is
+    /// common in titles and rare in bodies is judged separately in each rather
+    /// than averaged across both.
+    ///
+    /// `MissingIndex` when nothing was declared for this label and property. That
+    /// is deliberately not an empty result: no index and no matches are different
+    /// situations, and returning nothing for both would leave a typo in a property
+    /// name looking like a query that simply found nothing.
+    pub fn ftsSearchIndex(
+        self: *Self,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError![]FtsSearchResult {
+        const definition = try self.ftsDefinitionFor(kind, scope, property, false);
+        var catalog = self.ftsCatalog() orelse return DatabaseError.MissingIndex;
+        if (!(catalog.has(definition) catch |err| return mapFtsCatalogError(err))) {
+            return DatabaseError.MissingIndex;
+        }
+        var index = self.ftsIndexFor(definition);
+        return index.search(query_text, limit) catch |err| return mapFtsError(err);
+    }
+
+    pub fn createNodeFtsIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!void {
+        try self.createFtsIndex(.node, label, property);
+    }
+
+    pub fn dropNodeFtsIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!void {
+        try self.dropFtsIndex(.node, label, property);
+    }
+
+    pub fn hasNodeFtsIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!bool {
+        return self.hasFtsIndex(.node, label, property);
+    }
+
+    pub fn createEdgeFtsIndex(self: *Self, edge_type: []const u8, property: []const u8) DatabaseError!void {
+        try self.createFtsIndex(.edge, edge_type, property);
+    }
+
+    pub fn dropEdgeFtsIndex(self: *Self, edge_type: []const u8, property: []const u8) DatabaseError!void {
+        try self.dropFtsIndex(.edge, edge_type, property);
+    }
+
+    pub fn hasEdgeFtsIndex(self: *Self, edge_type: []const u8, property: []const u8) DatabaseError!bool {
+        return self.hasFtsIndex(.edge, edge_type, property);
+    }
+
+    /// Bring the declared full-text indexes in line with a change to one node.
+    ///
+    /// Empty old state means a create and empty new state means a delete, so every
+    /// write path calls this one function rather than choosing between three.
+    fn ftsReplaceNode(
+        self: *Self,
+        node_id: NodeId,
+        old_labels: []const symbols_mod.SymbolId,
+        old_properties: []const node_mod.Property,
+        new_labels: []const symbols_mod.SymbolId,
+        new_properties: []const node_mod.Property,
+    ) DatabaseError!void {
+        if (!self.fts_declared) return;
+        var catalog = self.ftsCatalog() orelse return;
+        var iter: FtsCatalog.DefinitionIterator = undefined;
+        catalog.iterate(.node, &iter) catch |err| return mapFtsCatalogError(err);
+        defer iter.deinit();
+        while (iter.next() catch |err| return mapFtsCatalogError(err)) |definition| {
+            const was = if (containsSymbolId(old_labels, definition.scope_id))
+                ftsTextOf(definition, old_properties)
+            else
+                null;
+            const now = if (containsSymbolId(new_labels, definition.scope_id))
+                ftsTextOf(definition, new_properties)
+            else
+                null;
+            try self.ftsReplaceDocument(definition, node_id, was, now);
+        }
+    }
+
+    /// The same for an edge, which is scoped by its type rather than its labels.
+    fn ftsReplaceEdge(
+        self: *Self,
+        edge_id: EdgeId,
+        old_type: symbols_mod.SymbolId,
+        old_properties: []const node_mod.Property,
+        new_type: symbols_mod.SymbolId,
+        new_properties: []const node_mod.Property,
+        had_old: bool,
+        has_new: bool,
+    ) DatabaseError!void {
+        if (!self.fts_declared) return;
+        var catalog = self.ftsCatalog() orelse return;
+        var iter: FtsCatalog.DefinitionIterator = undefined;
+        catalog.iterate(.edge, &iter) catch |err| return mapFtsCatalogError(err);
+        defer iter.deinit();
+        while (iter.next() catch |err| return mapFtsCatalogError(err)) |definition| {
+            const was = if (had_old and old_type == definition.scope_id)
+                ftsTextOf(definition, old_properties)
+            else
+                null;
+            const now = if (has_new and new_type == definition.scope_id)
+                ftsTextOf(definition, new_properties)
+            else
+                null;
+            try self.ftsReplaceDocument(definition, edge_id, was, now);
+        }
+    }
+
+    fn ftsReplaceDocument(
+        self: *Self,
+        definition: FtsDefinition,
+        doc_id: NodeId,
+        was: ?[]const u8,
+        now: ?[]const u8,
+    ) DatabaseError!void {
+        if (was == null and now == null) return;
+        // Text that did not change is already indexed correctly, and reindexing it
+        // would make every unrelated property write pay for the longest indexed
+        // string on the entity.
+        if (was != null and now != null and std.mem.eql(u8, was.?, now.?)) return;
+
+        var index = self.ftsIndexFor(definition);
+        if (was != null) {
+            index.removeDocument(doc_id) catch |err| switch (err) {
+                FtsError.NotFound => {},
+                else => return mapFtsError(err),
+            };
+        }
+        if (now) |text| {
+            _ = index.indexDocument(doc_id, text) catch |err| return mapFtsError(err);
+        }
     }
 
     fn nodeStateMatchesPropertyIndex(
@@ -4678,6 +5064,7 @@ pub const Database = struct {
             if (self.property_index) |*index| {
                 index.removeNode(node_id, node.labels, node.properties) catch |err| return mapPropertyIndexError(err);
             }
+            try self.ftsReplaceNode(node_id, node.labels, node.properties, &.{}, &.{});
             for (node.labels) |label_id| {
                 self.label_index.remove(label_id, node_id) catch |err| {
                     return switch (err) {
@@ -5943,6 +6330,7 @@ pub const Database = struct {
         if (self.property_index) |*index| {
             index.removeEdge(edge_id, edge.edge_type, edge.properties) catch |err| return mapPropertyIndexError(err);
         }
+        try self.ftsReplaceEdge(edge_id, edge.edge_type, edge.properties, 0, &.{}, true, false);
         self.edge_store.deleteById(edge_id) catch {
             return DatabaseError.IoError;
         };
@@ -6033,6 +6421,7 @@ pub const Database = struct {
         if (self.property_index) |*index| {
             index.removeEdge(edge_id, edge.edge_type, edge.properties) catch |err| return mapPropertyIndexError(err);
         }
+        try self.ftsReplaceEdge(edge_id, edge.edge_type, edge.properties, 0, &.{}, true, false);
         self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
 
         if (self.adjacency_cache) |*cache| {

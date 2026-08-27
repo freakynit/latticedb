@@ -355,6 +355,27 @@ pub const FtsIndex = struct {
         return @intCast(tokens.len);
     }
 
+    /// Empty this index completely.
+    ///
+    /// Only the entries under this index's own scope go, so the other declared
+    /// indexes sharing the same trees are untouched. This is for redeclaring or
+    /// rebuilding an index, where walking the documents one at a time would miss
+    /// any whose entity no longer exists — exactly the state a crash in the middle
+    /// of a write leaves behind.
+    ///
+    /// The posting pages themselves stay allocated. Nothing points at them once
+    /// the dictionary entries naming them are gone, so they are wasted space
+    /// rather than wrong data, and freeing them needs page reclamation the store
+    /// does not have yet.
+    pub fn clearScope(self: *Self) FtsError!void {
+        self.dictionary.tree.clear(self.allocator) catch return FtsError.BTreeError;
+        self.doc_lengths.tree.clear(self.allocator) catch return FtsError.BTreeError;
+        self.doc_lengths.stats = .{ .total_docs = 0, .total_tokens = 0, .avg_doc_length = 0 };
+        if (self.reverse_index) |*ri| {
+            ri.tree.clear(self.allocator) catch return FtsError.BTreeError;
+        }
+    }
+
     /// Remove a document from the index
     /// If reverse_index is available, properly cleans up posting lists and stats
     pub fn removeDocument(self: *Self, doc_id: DocId) FtsError!void {

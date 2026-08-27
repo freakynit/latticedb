@@ -191,6 +191,45 @@ pub const ScopedTree = struct {
         return self.rangeOwned(null, null, out);
     }
 
+    /// Delete everything belonging to this index.
+    ///
+    /// Deleting while iterating is not safe — the iterator holds a pinned leaf and
+    /// a slot in it, and a delete can restructure the tree underneath both — so
+    /// this collects a batch of keys, closes the iterator, deletes them, and goes
+    /// round again. A fixed batch keeps the memory constant rather than
+    /// proportional to the index, which matters because the thing being cleared is
+    /// sometimes the largest structure in the database.
+    pub fn clear(self: Self, allocator: std.mem.Allocator) ScopedTreeError!void {
+        const BATCH = 512;
+        var keys: [BATCH][]u8 = undefined;
+
+        while (true) {
+            var count: usize = 0;
+            {
+                var iter: Iterator = undefined;
+                try self.iterateAll(&iter);
+                defer iter.deinit();
+                while (count < BATCH) {
+                    const entry = (try iter.next()) orelse break;
+                    keys[count] = allocator.dupe(u8, entry.key) catch return ScopedTreeError.OutOfMemory;
+                    count += 1;
+                }
+            }
+            if (count == 0) return;
+
+            defer for (keys[0..count]) |key| allocator.free(key);
+            for (keys[0..count]) |key| {
+                // The keys came out of the tree already carrying the prefix, so
+                // they go back to the tree as they are rather than through the
+                // view, which would prefix them a second time.
+                self.tree.delete(key) catch |err| switch (err) {
+                    ScopedTreeError.KeyNotFound => {},
+                    else => return err,
+                };
+            }
+        }
+    }
+
     /// Strip the prefix from a key an iterator returned.
     pub fn callerKey(self: Self, stored: []const u8) ?[]const u8 {
         if (self.prefix == null) return stored;

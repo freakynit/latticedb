@@ -81,29 +81,50 @@ pub const FtsCatalog = struct {
         return self.catalog.contains(&key) catch return FtsCatalogError.IoError;
     }
 
+    /// A walk over the declarations of one kind.
+    ///
+    /// The iterator owns its bounds. The tree's iterator keeps the end key as a
+    /// slice and compares against it on every step, so bounds built in a local and
+    /// handed out by slice leave it reading freed stack — which does not crash, it
+    /// just quietly ends the walk early or never starts it, and the caller sees a
+    /// catalog with nothing in it.
+    pub const DefinitionIterator = struct {
+        inner: BTree.Iterator,
+        start: [1]u8 = undefined,
+        end: [1]u8 = undefined,
+
+        pub fn next(self: *DefinitionIterator) FtsCatalogError!?FtsDefinition {
+            const entry = self.inner.next() catch |err| return mapBTreeError(err);
+            const found = entry orelse return null;
+            if (found.key.len != DEFINITION_KEY_SIZE) return FtsCatalogError.InvalidData;
+
+            const kind: FtsEntityKind = switch (found.key[0]) {
+                @intFromEnum(FtsEntityKind.node) => .node,
+                @intFromEnum(FtsEntityKind.edge) => .edge,
+                else => return FtsCatalogError.InvalidData,
+            };
+
+            return FtsDefinition{
+                .kind = kind,
+                .scope_id = std.mem.readInt(u16, found.key[1..3], .big),
+                .property_id = std.mem.readInt(u16, found.key[3..5], .big),
+            };
+        }
+
+        pub fn deinit(self: *DefinitionIterator) void {
+            self.inner.deinit();
+        }
+    };
+
     /// Walk every declared index of one kind.
-    pub fn iterator(self: *Self, kind: FtsEntityKind) FtsCatalogError!BTree.Iterator {
-        const start = [_]u8{@intFromEnum(kind)};
-        const end = [_]u8{@intFromEnum(kind) + 1};
-        return self.catalog.range(&start, &end) catch |err| return mapBTreeError(err);
-    }
-
-    pub fn next(iter: *BTree.Iterator) FtsCatalogError!?FtsDefinition {
-        const entry = iter.next() catch |err| return mapBTreeError(err);
-        const found = entry orelse return null;
-        if (found.key.len != DEFINITION_KEY_SIZE) return FtsCatalogError.InvalidData;
-
-        const kind: FtsEntityKind = switch (found.key[0]) {
-            @intFromEnum(FtsEntityKind.node) => .node,
-            @intFromEnum(FtsEntityKind.edge) => .edge,
-            else => return FtsCatalogError.InvalidData,
-        };
-
-        return FtsDefinition{
-            .kind = kind,
-            .scope_id = std.mem.readInt(u16, found.key[1..3], .big),
-            .property_id = std.mem.readInt(u16, found.key[3..5], .big),
-        };
+    ///
+    /// The iterator is written into `out` rather than returned, because it holds
+    /// the bounds the walk compares against and moving it would leave those
+    /// comparisons pointing at the old copy.
+    pub fn iterate(self: *Self, kind: FtsEntityKind, out: *DefinitionIterator) FtsCatalogError!void {
+        out.start = .{@intFromEnum(kind)};
+        out.end = .{@intFromEnum(kind) + 1};
+        out.inner = self.catalog.range(&out.start, &out.end) catch |err| return mapBTreeError(err);
     }
 
     /// Find the index declared for a property, if there is one.
