@@ -225,9 +225,36 @@ In:
 
 Out, for now:
 
-- Indexing several properties into one searchable unit. Worth having, and a
-  different feature: it needs a name for the combined index and a rule for
-  scoring across fields.
+- **An index covering several properties.** This was considered and rejected, and
+  the reason is the query syntax rather than the storage.
+
+  Storing several properties as one document is easy. Asking for it is not. If an
+  index merges `title` and `body`, then `WHERE d.title @@ "x"` matches documents
+  whose *body* contains the term, and the property name is lying again — which is
+  the exact bug this whole design exists to fix. Reusing property access requires
+  one property per index.
+
+  Naming the index instead, as in `fts(d, "doc_search") @@ "x"`, avoids that at
+  the cost of syntax Cypher does not have and a second namespace to manage. Not
+  worth it for this release.
+
+  The migration for somebody searching several fields today is better than it
+  sounds. They store the combined text in a property and index that:
+
+  ```python
+  doc["search_text"] = title + " " + body
+  db.create_node_fts_index("Document", "search_text")
+  ```
+
+  Same single document, same merged score, and the searchable text is visible in
+  the database instead of hidden inside an index where nothing can rebuild it.
+  That last part is what made the old API impossible to migrate away from.
+
+- **Merged ranking across separately indexed properties.** `WHERE d.title @@ "x"
+  OR d.body @@ "x"` filters correctly but produces two scores rather than one
+  ranking. That is a real limitation and a distinct feature: it needs a way to
+  express "score these fields together", which is a syntax question, not a storage
+  one.
 - Full-text indexes on edges, unless it falls out for free.
 - Changing the tokenizer, the analyzer, or anything about how terms are produced.
 - Cypher syntax for declaring an index. There is none for property indexes either,
