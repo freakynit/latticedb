@@ -18,6 +18,16 @@ const PropertyValue = types.PropertyValue;
 const vector_distance = @import("../vector/distance.zig");
 
 const Row = executor.Row;
+
+/// How many index hits to consider when `@@` is evaluated as a filter rather
+/// than planned as a scan.
+///
+/// The filter only needs to know whether one particular node is among the
+/// matches, so this bounds the work rather than expressing a result limit. It is
+/// large enough that a node matching the query will be found, and small enough
+/// that a broad query does not materialise the corpus. A planner that turns the
+/// predicate into a scan avoids the question entirely.
+const FTS_FILTER_LIMIT: u32 = 10_000;
 const SlotValue = executor.SlotValue;
 const ExecutionContext = executor.ExecutionContext;
 
@@ -382,6 +392,22 @@ pub const ExpressionEvaluator = struct {
             if (left.isTruthy()) return .{ .bool_val = true };
             const right = try self.evaluate(b.right, row, ctx);
             return .{ .bool_val = right.isTruthy() };
+        }
+
+        // Full-text match is answered by the index, not by looking at the text in
+        // front of us, so it is handled before the left side is evaluated to a
+        // string.
+        //
+        // Reaching this point at all means the planner did not turn the whole
+        // WHERE clause into an index scan, which happens as soon as `@@` appears
+        // inside AND or OR. Falling back to a substring test would make the same
+        // operator mean two different things depending on where it sits: an
+        // indexed, stemmed, scored search at the top level, and a case-insensitive
+        // substring check anywhere else. Those disagree about which documents
+        // match, so a query could be changed from correct to incorrect by adding
+        // an unrelated OR beside it.
+        if (b.operator == .fts_match) {
+            return self.ftsMatchIndexed(b, row, ctx);
         }
 
         // Evaluate both sides
@@ -1184,6 +1210,78 @@ pub const ExpressionEvaluator = struct {
             },
             else => null,
         };
+    }
+
+    /// Ask the full-text index whether this row's node matches.
+    ///
+    /// The left side names a node through a property access. Which property is
+    /// named does not currently select anything, because the index holds one
+    /// document per node rather than one per property; that is what declared
+    /// per-property indexes will change.
+    fn ftsMatchIndexed(
+        self: *Self,
+        b: *const ast.BinaryExpr,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const database = ctx.database orelse return .{ .null_val = {} };
+
+        // The node being tested, reached through the variable the property
+        // access hangs off.
+        const property_access = switch (b.left.*) {
+            .property_access => |pa| pa,
+            // Anything that is not a property on a node has no indexed document
+            // behind it, so there is nothing to look up. `"some text" @@ "query"`
+            // asks whether one piece of text matches another, which is a
+            // different and self-contained question.
+            else => return self.ftsMatchLiteral(b, row, ctx),
+        };
+        const variable = switch (property_access.object.*) {
+            .variable => |v| v,
+            else => return self.ftsMatchLiteral(b, row, ctx),
+        };
+        const slot = ctx.variables.get(variable.name) orelse {
+            return self.ftsMatchLiteral(b, row, ctx);
+        };
+        const node_id = row.slots[slot].asNodeId() orelse {
+            return self.ftsMatchLiteral(b, row, ctx);
+        };
+
+        const query = switch (try self.evaluate(b.right, row, ctx)) {
+            .string_val => |q| q,
+            else => return .{ .null_val = {} },
+        };
+        if (query.len == 0) return .{ .bool_val = false };
+
+        // Asking the index one node at a time is slower than scanning it once,
+        // which is why the planner prefers an index scan when it can build one.
+        // Correctness first: a filter that agrees with the scan beats a fast
+        // filter that disagrees with it.
+        const results = database.ftsSearchInTxn(ctx.txn, query, FTS_FILTER_LIMIT) catch {
+            return .{ .null_val = {} };
+        };
+        defer database.freeFtsSearchResults(results);
+
+        for (results) |hit| {
+            if (hit.doc_id == node_id) return .{ .bool_val = true };
+        }
+        return .{ .bool_val = false };
+    }
+
+    /// Match text against a query without involving any index.
+    ///
+    /// Used when the left side is not a node's property, as in
+    /// `"some text" @@ "query"`. There is no document to look up, so this asks
+    /// the self-contained question instead: does this text contain these terms.
+    fn ftsMatchLiteral(
+        self: *Self,
+        b: *const ast.BinaryExpr,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const left = try self.evaluate(b.left, row, ctx);
+        const right = try self.evaluate(b.right, row, ctx);
+        return self.ftsMatch(left, right);
     }
 
     fn ftsMatch(_: *Self, left: EvalResult, right: EvalResult) EvalResult {

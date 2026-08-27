@@ -4701,3 +4701,90 @@ test "database: a shorter document scores higher for the same term" {
     try std.testing.expectEqual(@as(u64, 1), hits[0].doc_id);
     try std.testing.expect(hits[0].score > hits[1].score);
 }
+
+test "database: full-text match means the same thing inside a boolean expression" {
+    const allocator = std.testing.allocator;
+
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, node, "title", .{ .string_val = "sourdough" });
+    try db.setNodeProperty(&txn, node, "body", .{ .string_val = "a loaf" });
+    try db.commitTransaction(&txn);
+
+    // The indexed text deliberately shares no words with either property, so a
+    // search that reads the property and a search that reads the index cannot be
+    // mistaken for one another.
+    try db.ftsIndexDocument(node, "ciabatta focaccia");
+
+    // The planner turns a whole WHERE clause into an index scan, so this hits the
+    // index and matches.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+
+    // Putting the same predicate inside an OR used to fall through to a filter
+    // that substring-matched the property instead, so it searched different data
+    // and returned the opposite answer. Adding an unrelated OR beside a correct
+    // query could turn it into an incorrect one, with nothing to say so.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.body @@ 'zzz' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+
+    // And the mirror image: text that is in the property but was never indexed
+    // matches in neither position.
+    {
+        var top = try db.query("MATCH (d:Doc) WHERE d.title @@ 'sourdough' RETURN d.title AS t");
+        defer top.deinit();
+        try std.testing.expectEqual(@as(usize, 0), top.rowCount());
+
+        var inside = try db.query("MATCH (d:Doc) WHERE d.title @@ 'sourdough' OR d.body @@ 'zzz' RETURN d.title AS t");
+        defer inside.deinit();
+        try std.testing.expectEqual(@as(usize, 0), inside.rowCount());
+    }
+
+    // AND is the same story.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' AND d.title = 'sourdough' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+}
+
+test "database: a disjunction of full-text matches finds either side" {
+    const allocator = std.testing.allocator;
+
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    const a = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    const b = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    const c = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, a, "name", .{ .string_val = "a" });
+    try db.setNodeProperty(&txn, b, "name", .{ .string_val = "b" });
+    try db.setNodeProperty(&txn, c, "name", .{ .string_val = "c" });
+    try db.commitTransaction(&txn);
+
+    try db.ftsIndexDocument(a, "ciabatta");
+    try db.ftsIndexDocument(b, "focaccia");
+    try db.ftsIndexDocument(c, "brioche");
+
+    var r = try db.query(
+        "MATCH (d:Doc) WHERE d.text @@ 'ciabatta' OR d.text @@ 'focaccia' RETURN d.name AS n",
+    );
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 2), r.rowCount());
+}
