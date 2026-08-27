@@ -4424,6 +4424,11 @@ test "database: a tiny buffer pool still completes real work" {
     });
     defer db.close();
 
+    // Declared before the writes, so the index is maintained as they happen
+    // rather than built afterwards. That is the path with the tighter page
+    // budget, which is what this test is about.
+    try db.createNodeFtsIndex("Link", "text");
+
     var txn = try db.beginTransaction(.read_write);
     var previous: ?u64 = null;
     var i: usize = 0;
@@ -4712,50 +4717,56 @@ test "database: full-text match means the same thing inside a boolean expression
     });
     defer db.close();
 
+    try db.createNodeFtsIndex("Doc", "title");
+    try db.createNodeFtsIndex("Doc", "body");
+
     var txn = try db.beginTransaction(.read_write);
     const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
     try db.setNodeProperty(&txn, node, "title", .{ .string_val = "sourdough" });
-    try db.setNodeProperty(&txn, node, "body", .{ .string_val = "a loaf" });
+    try db.setNodeProperty(&txn, node, "body", .{ .string_val = "ciabatta focaccia" });
     try db.commitTransaction(&txn);
 
-    // The indexed text deliberately shares no words with either property, so a
-    // search that reads the property and a search that reads the index cannot be
-    // mistaken for one another.
-    try db.ftsIndexDocument(node, "ciabatta focaccia");
-
-    // The planner turns a whole WHERE clause into an index scan, so this hits the
-    // index and matches.
+    // A whole WHERE clause becomes an index scan, so this reads the title index.
     {
-        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' RETURN d.title AS t");
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'sourdough' RETURN d.title AS t");
         defer r.deinit();
         try std.testing.expectEqual(@as(usize, 1), r.rowCount());
     }
 
-    // Putting the same predicate inside an OR used to fall through to a filter
-    // that substring-matched the property instead, so it searched different data
-    // and returned the opposite answer. Adding an unrelated OR beside a correct
-    // query could turn it into an incorrect one, with nothing to say so.
+    // The same predicate inside an OR goes through the row filter instead. It
+    // used to substring-match the property there, so it read different data and
+    // gave the opposite answer: an unrelated OR beside a correct query could turn
+    // it into an incorrect one, with nothing to say so. Both positions now
+    // resolve to the same declared index.
     {
-        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.body @@ 'zzz' RETURN d.title AS t");
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'sourdough' OR d.body @@ 'zzz' RETURN d.title AS t");
         defer r.deinit();
         try std.testing.expectEqual(@as(usize, 1), r.rowCount());
     }
 
-    // And the mirror image: text that is in the property but was never indexed
-    // matches in neither position.
+    // A term that is in the body is not in the title, in either position. This is
+    // what per-property indexes are for, and it is the case the old single
+    // document per node could not express at all.
     {
-        var top = try db.query("MATCH (d:Doc) WHERE d.title @@ 'sourdough' RETURN d.title AS t");
+        var top = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' RETURN d.title AS t");
         defer top.deinit();
         try std.testing.expectEqual(@as(usize, 0), top.rowCount());
 
-        var inside = try db.query("MATCH (d:Doc) WHERE d.title @@ 'sourdough' OR d.body @@ 'zzz' RETURN d.title AS t");
+        var inside = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.title @@ 'zzz' RETURN d.title AS t");
         defer inside.deinit();
         try std.testing.expectEqual(@as(usize, 0), inside.rowCount());
     }
 
+    // Searching the body for that same term does find it.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.body @@ 'ciabatta' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+
     // AND is the same story.
     {
-        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' AND d.title = 'sourdough' RETURN d.title AS t");
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'sourdough' AND d.title = 'sourdough' RETURN d.title AS t");
         defer r.deinit();
         try std.testing.expectEqual(@as(usize, 1), r.rowCount());
     }
@@ -4770,6 +4781,8 @@ test "database: a disjunction of full-text matches finds either side" {
     });
     defer db.close();
 
+    try db.createNodeFtsIndex("Doc", "text");
+
     var txn = try db.beginTransaction(.read_write);
     const a = try db.createNode(&txn, &[_][]const u8{"Doc"});
     const b = try db.createNode(&txn, &[_][]const u8{"Doc"});
@@ -4777,17 +4790,64 @@ test "database: a disjunction of full-text matches finds either side" {
     try db.setNodeProperty(&txn, a, "name", .{ .string_val = "a" });
     try db.setNodeProperty(&txn, b, "name", .{ .string_val = "b" });
     try db.setNodeProperty(&txn, c, "name", .{ .string_val = "c" });
+    try db.setNodeProperty(&txn, a, "text", .{ .string_val = "ciabatta" });
+    try db.setNodeProperty(&txn, b, "text", .{ .string_val = "focaccia" });
+    try db.setNodeProperty(&txn, c, "text", .{ .string_val = "brioche" });
     try db.commitTransaction(&txn);
-
-    try db.ftsIndexDocument(a, "ciabatta");
-    try db.ftsIndexDocument(b, "focaccia");
-    try db.ftsIndexDocument(c, "brioche");
 
     var r = try db.query(
         "MATCH (d:Doc) WHERE d.text @@ 'ciabatta' OR d.text @@ 'focaccia' RETURN d.name AS n",
     );
     defer r.deinit();
     try std.testing.expectEqual(@as(usize, 2), r.rowCount());
+}
+
+test "database: searching a property with no declared index says so" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    const doc = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, doc, "title", .{ .string_val = "sourdough" });
+
+    // Returning no rows would be indistinguishable from a search that found
+    // nothing, which is how a mistyped property name goes unnoticed.
+    var failed = try db.queryDetailed("MATCH (d:Doc) WHERE d.title @@ 'sourdough' RETURN d.title AS t");
+    defer failed.deinit();
+    switch (failed) {
+        .success => return error.TestExpectedFailure,
+        .failure => |f| {
+            try std.testing.expect(std.mem.indexOf(u8, f.message, "Doc.title") != null);
+        },
+    }
+}
+
+test "database: a full-text match with no label to resolve against says so" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+    const doc = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, doc, "title", .{ .string_val = "sourdough" });
+
+    // Two labels can each declare an index on `title`, so an unlabelled pattern
+    // does not say which one is meant. Guessing would make the answer depend on
+    // what else happens to be declared.
+    var failed = try db.queryDetailed("MATCH (d) WHERE d.title @@ 'sourdough' RETURN d.title AS t");
+    defer failed.deinit();
+    switch (failed) {
+        .success => return error.TestExpectedFailure,
+        .failure => |f| {
+            try std.testing.expect(std.mem.indexOf(u8, f.message, "label") != null);
+        },
+    }
 }
 
 test "database: scoped full-text views stay out of each other's way" {

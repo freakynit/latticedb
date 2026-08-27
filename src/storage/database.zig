@@ -3449,6 +3449,158 @@ pub const Database = struct {
         return index.search(query_text, limit) catch |err| return mapFtsError(err);
     }
 
+    /// Search one declared index, including what an open transaction has written
+    /// but not yet committed.
+    ///
+    /// A node whose text changed in this transaction is scored from the pending
+    /// text rather than the indexed text, and a node whose text stopped matching
+    /// drops out. Without that, a query inside a transaction would answer from
+    /// the state before its own writes, which is the one place a reader is
+    /// entitled to see them.
+    ///
+    /// The pending text is scored by term presence rather than BM25, matching what
+    /// the unscoped search already does for uncommitted documents. Those scores
+    /// are not comparable with the index's, so this is about which rows come back
+    /// rather than exactly how they rank among themselves.
+    pub fn ftsSearchIndexInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError![]FtsSearchResult {
+        const definition = try self.ftsDefinitionFor(kind, scope, property, false);
+        var catalog = self.ftsCatalog() orelse return DatabaseError.MissingIndex;
+        if (!(catalog.has(definition) catch |err| return mapFtsCatalogError(err))) {
+            return DatabaseError.MissingIndex;
+        }
+        return self.ftsSearchDefinitionInTxn(txn, definition, query_text, limit);
+    }
+
+    /// The search itself, once the definition is known to exist.
+    ///
+    /// Callers that already hold a definition use this rather than turning it back
+    /// into label and property strings for the other entry point to look up again.
+    fn ftsSearchDefinitionInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        definition: FtsDefinition,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError![]FtsSearchResult {
+        // Only node states are merged. `@@` reads a property off a node, so an
+        // edge index is not reachable from a query and has no pending state to
+        // reconcile here.
+        const overlay = blk: {
+            if (definition.kind != .node) break :blk null;
+            const t = txn orelse break :blk null;
+            const found = self.getTxnOverlay(t) orelse break :blk null;
+            if (found.node_states.count() == 0) break :blk null;
+            break :blk found;
+        };
+
+        var index = self.ftsIndexFor(definition);
+        if (overlay == null) {
+            return index.search(query_text, limit) catch |err| return mapFtsError(err);
+        }
+        const pending = overlay.?;
+
+        const extra: u32 = @intCast(pending.node_states.count());
+        const base_results = index.search(query_text, limit + extra) catch |err| return mapFtsError(err);
+        defer self.freeFtsSearchResults(base_results);
+
+        var merged: std.ArrayListUnmanaged(FtsSearchResult) = .empty;
+        errdefer merged.deinit(self.allocator);
+
+        var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer seen.deinit(self.allocator);
+
+        for (base_results) |result| {
+            try seen.put(self.allocator, result.doc_id, {});
+            if (pending.node_states.get(result.doc_id)) |state| {
+                if (try self.pendingFtsScore(definition, state, query_text)) |score| {
+                    merged.append(self.allocator, .{ .doc_id = result.doc_id, .score = score }) catch {
+                        return DatabaseError.OutOfMemory;
+                    };
+                }
+                continue;
+            }
+            merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
+        }
+
+        var overlay_iter = pending.node_states.iterator();
+        while (overlay_iter.next()) |entry| {
+            if (seen.contains(entry.key_ptr.*)) continue;
+            if (try self.pendingFtsScore(definition, entry.value_ptr.*, query_text)) |score| {
+                merged.append(self.allocator, .{ .doc_id = entry.key_ptr.*, .score = score }) catch {
+                    return DatabaseError.OutOfMemory;
+                };
+            }
+        }
+
+        std.mem.sort(FtsSearchResult, merged.items, {}, FtsSearchResult.lessThan);
+        if (merged.items.len > limit) merged.items.len = limit;
+        return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    /// What an uncommitted node state would score for a declared index, or null
+    /// when it would not be in that index at all.
+    fn pendingFtsScore(
+        self: *Self,
+        definition: FtsDefinition,
+        state: TxnNodeState,
+        query_text: []const u8,
+    ) DatabaseError!?f32 {
+        if (!state.exists) return null;
+        if (!containsSymbolId(state.labels, definition.scope_id)) return null;
+        const text = ftsTextOf(definition, state.properties) orelse return null;
+        const score = try self.overlayFtsScore(query_text, text);
+        return if (score > 0) score else null;
+    }
+
+    /// Whether one node matches a query through the index declared for a property.
+    ///
+    /// Used where `@@` sits inside a larger condition and the planner could not
+    /// turn the whole WHERE into an index scan. The label comes from the node
+    /// itself rather than from the pattern, because by this point there is a real
+    /// node in hand and its own labels are the more specific answer.
+    ///
+    /// Null means no index is declared for this property on any label the node
+    /// carries, which the caller reports rather than reading as "did not match".
+    pub fn ftsNodeMatches(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        property: []const u8,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError!?bool {
+        const property_id = self.symbol_table.lookup(property) catch return null;
+
+        var node = (try self.getNodeInTxn(txn, node_id)) orelse return null;
+        defer node.deinit(self.allocator);
+
+        var catalog = self.ftsCatalog() orelse return null;
+        for (node.labels) |label_id| {
+            const definition = FtsDefinition{
+                .kind = .node,
+                .scope_id = label_id,
+                .property_id = property_id,
+            };
+            if (!(catalog.has(definition) catch |err| return mapFtsCatalogError(err))) continue;
+
+            const results = try self.ftsSearchDefinitionInTxn(txn, definition, query_text, limit);
+            defer self.freeFtsSearchResults(results);
+            for (results) |hit| {
+                if (hit.doc_id == node_id) return true;
+            }
+            return false;
+        }
+        return null;
+    }
+
     pub fn createNodeFtsIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!void {
         try self.createFtsIndex(.node, label, property);
     }
@@ -7772,7 +7924,7 @@ pub const Database = struct {
         };
 
         const root_op = planner.plan(ast_query, &analysis_result) catch |err| {
-            return self.makePlanFailure(err);
+            return self.makePlanFailure(err, planner.planErrorDetail());
         };
 
         // A query that changes data and was not given a transaction gets one of
@@ -7899,8 +8051,15 @@ pub const Database = struct {
         return self.makeFailure(.semantic, "Semantic error: invalid query structure", null, null);
     }
 
-    fn makePlanFailure(self: *Self, err: anyerror) QueryError!QueryDetailedResult {
-        return self.makeFailure(.plan, "Plan error: could not create execution plan", @errorName(err), null);
+    fn makePlanFailure(self: *Self, err: anyerror, detail: ?[]const u8) QueryError!QueryDetailedResult {
+        // A planner that knows why it failed says so. "Could not create execution
+        // plan" is true of every plan failure and useful for none of them.
+        return self.makeFailure(
+            .plan,
+            detail orelse "Plan error: could not create execution plan",
+            @errorName(err),
+            null,
+        );
     }
 
     fn makeExecutionFailure(self: *Self, err: anyerror) QueryError!QueryDetailedResult {

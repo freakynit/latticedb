@@ -1972,18 +1972,23 @@ test "query: full-text search with @@ operator" {
     var db = try openTestDb(path, .{ .enable_fts = true });
     defer cleanupTestDb(db, path);
 
-    // Create documents with text content
+    // The searchable text lives in the property the query names, and an index is
+    // declared over it. Before per-property indexes, `a.text` named nothing at
+    // all: the text was handed straight to the index and `text` was not a
+    // property on these nodes.
+    try db.createNodeFtsIndex("Article", "text");
+
     const n1 = try db.createNode(null, &[_][]const u8{"Article"});
     try db.setNodeProperty(null, n1, "title", .{ .string_val = "Graph Databases" });
-    try db.ftsIndexDocument(n1, "Graph databases store data as nodes and edges for efficient traversal");
+    try db.setNodeProperty(null, n1, "text", .{ .string_val = "Graph databases store data as nodes and edges for efficient traversal" });
 
     const n2 = try db.createNode(null, &[_][]const u8{"Article"});
     try db.setNodeProperty(null, n2, "title", .{ .string_val = "Relational Databases" });
-    try db.ftsIndexDocument(n2, "Relational databases use tables and SQL for data management");
+    try db.setNodeProperty(null, n2, "text", .{ .string_val = "Relational databases use tables and SQL for data management" });
 
     const n3 = try db.createNode(null, &[_][]const u8{"Article"});
     try db.setNodeProperty(null, n3, "title", .{ .string_val = "Neural Networks" });
-    try db.ftsIndexDocument(n3, "Deep learning and neural networks for pattern recognition");
+    try db.setNodeProperty(null, n3, "text", .{ .string_val = "Deep learning and neural networks for pattern recognition" });
 
     // Search via Cypher
     var result = try db.query("MATCH (a:Article) WHERE a.text @@ \"graph databases\" RETURN a.title");
@@ -2003,13 +2008,15 @@ test "query: full-text search preserves additional MATCH bindings" {
     const topic_misc = try db.createNode(null, &[_][]const u8{"Topic"});
     try db.setNodeProperty(null, topic_misc, "name", .{ .string_val = "Misc" });
 
+    try db.createNodeFtsIndex("Article", "text");
+
     const a1 = try db.createNode(null, &[_][]const u8{"Article"});
     try db.setNodeProperty(null, a1, "title", .{ .string_val = "Graph 101" });
-    try db.ftsIndexDocument(a1, "Graph databases and traversal");
+    try db.setNodeProperty(null, a1, "text", .{ .string_val = "Graph databases and traversal" });
 
     const a2 = try db.createNode(null, &[_][]const u8{"Article"});
     try db.setNodeProperty(null, a2, "title", .{ .string_val = "Cooking 101" });
-    try db.ftsIndexDocument(a2, "Cooking recipes and ingredients");
+    try db.setNodeProperty(null, a2, "text", .{ .string_val = "Cooking recipes and ingredients" });
 
     try db.createEdge(null, a1, topic_db, "TAGGED");
     try db.createEdge(null, a2, topic_misc, "TAGGED");
@@ -2034,9 +2041,11 @@ test "query: full-text search preserves input row multiplicity" {
     const topic_b = try db.createNode(null, &[_][]const u8{"Topic"});
     try db.setNodeProperty(null, topic_b, "name", .{ .string_val = "B" });
 
+    try db.createNodeFtsIndex("Article", "text");
+
     const article = try db.createNode(null, &[_][]const u8{"Article"});
     try db.setNodeProperty(null, article, "title", .{ .string_val = "Graph Basics" });
-    try db.ftsIndexDocument(article, "Graph databases intro");
+    try db.setNodeProperty(null, article, "text", .{ .string_val = "Graph databases intro" });
 
     try db.createEdge(null, article, topic_a, "TAGGED");
     try db.createEdge(null, article, topic_b, "TAGGED");

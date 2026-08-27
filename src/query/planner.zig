@@ -80,6 +80,11 @@ pub const PlannerError = error{
     Unsupported,
     /// Internal error (unexpected condition)
     InternalError,
+    /// `@@` named a property with no full-text index declared for it.
+    MissingFtsIndex,
+    /// `@@` was used on a variable whose pattern carries no label, so there is
+    /// nothing to resolve the property against.
+    UnlabeledFtsMatch,
 };
 
 /// Storage context for planning (references to storage structures)
@@ -123,6 +128,21 @@ pub const QueryPlanner = struct {
     allocator: Allocator,
     storage: StorageContext,
     bindings: std.StringHashMap(VarBinding),
+    /// The labels each variable was written with in its MATCH pattern.
+    ///
+    /// `@@` needs these to say which declared index it means: a property name on
+    /// its own does not identify one, since two labels can each declare an index
+    /// on `title`. The slices point into the query's own syntax tree, which
+    /// outlives planning.
+    pattern_labels: std.StringHashMap([]const []const u8),
+    /// A specific explanation for the most recent planning failure.
+    ///
+    /// A plan error otherwise reaches the user as "could not create execution
+    /// plan", which tells someone who mistyped a property name nothing at all.
+    /// Written into a fixed buffer rather than allocated, because it has to
+    /// outlive the arena the plan was built in without owning anything.
+    detail_buf: [256]u8 = undefined,
+    detail_len: usize = 0,
     edge_bindings: std.StringHashMap(EdgeBinding),
     hidden_binding_names: std.ArrayList([]u8),
     next_slot: u8,
@@ -156,6 +176,7 @@ pub const QueryPlanner = struct {
             .allocator = allocator,
             .storage = storage,
             .bindings = std.StringHashMap(VarBinding).init(allocator),
+            .pattern_labels = std.StringHashMap([]const []const u8).init(allocator),
             .edge_bindings = std.StringHashMap(EdgeBinding).init(allocator),
             .hidden_binding_names = .empty,
             .next_slot = 0,
@@ -170,6 +191,7 @@ pub const QueryPlanner = struct {
         self.clearHiddenBindingNames();
         self.hidden_binding_names.deinit(self.allocator);
         self.bindings.deinit();
+        self.pattern_labels.deinit();
         self.edge_bindings.deinit();
     }
 
@@ -180,6 +202,7 @@ pub const QueryPlanner = struct {
         // Reset bindings for this query
         self.clearHiddenBindingNames();
         self.bindings.clearRetainingCapacity();
+        self.pattern_labels.clearRetainingCapacity();
         self.edge_bindings.clearRetainingCapacity();
         self.next_slot = 0;
         self.output_columns = 0;
@@ -311,6 +334,9 @@ pub const QueryPlanner = struct {
                     if (node_pattern.variable) |name| {
                         try self.bindVariable(name, slot, .node);
                         node_var_name = name;
+                        self.pattern_labels.put(name, node_pattern.labels) catch {
+                            return PlannerError.OutOfMemory;
+                        };
                     }
 
                     // Determine if we need to create a scan or filter
@@ -882,6 +908,8 @@ pub const QueryPlanner = struct {
         query_text: ?[]const u8,
         /// The property being searched
         property_name: ?[]const u8,
+        /// The variable the property hangs off, used to find its pattern labels
+        variable_name: ?[]const u8,
     };
 
     /// Detect FTS search pattern in expression
@@ -905,6 +933,7 @@ pub const QueryPlanner = struct {
             .param_name = null,
             .query_text = null,
             .property_name = null,
+            .variable_name = null,
         };
 
         // Left side should be property access: x.text
@@ -916,6 +945,7 @@ pub const QueryPlanner = struct {
             if (prop_access.object.* == .variable) {
                 const var_name = prop_access.object.variable.name;
                 info.variable_slot = self.getSlot(var_name);
+                info.variable_name = var_name;
             }
         }
 
@@ -937,17 +967,47 @@ pub const QueryPlanner = struct {
         return null;
     }
 
+    /// Which declared index `x.prop @@ ...` means.
+    ///
+    /// A property name does not identify an index on its own, because two labels
+    /// can each declare one on `title`. The label comes from the pattern the
+    /// variable was written in, which is where property index planning already
+    /// takes it from.
+    fn resolveFtsIndex(self: *Self, info: FtsSearchInfo) PlannerError![]const u8 {
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+        const property = info.property_name orelse return PlannerError.InvalidQuery;
+        const variable = info.variable_name orelse return PlannerError.InvalidQuery;
+
+        const labels = self.pattern_labels.get(variable) orelse &[_][]const u8{};
+        if (labels.len == 0) {
+            self.setPlanDetail(
+                "`{s}.{s} @@ ...` needs a label to say which full-text index it means. Write it in the pattern, as in ({s}:Label).",
+                .{ variable, property, variable },
+            );
+            return PlannerError.UnlabeledFtsMatch;
+        }
+
+        for (labels) |label| {
+            if (database.hasNodeFtsIndex(label, property) catch false) return label;
+        }
+
+        self.setPlanDetail(
+            "No full-text index is declared for {s}.{s}. Declare one before searching it.",
+            .{ labels[0], property },
+        );
+        return PlannerError.MissingFtsIndex;
+    }
+
     /// Plan an FTS search operator
     fn planFtsSearch(self: *Self, input: Operator, info: FtsSearchInfo) PlannerError!Operator {
         _ = self.storage.fts_index orelse return PlannerError.MissingStorage;
         const database = self.storage.database orelse return PlannerError.MissingStorage;
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
+        const label = try self.resolveFtsIndex(info);
+        const property = info.property_name orelse return PlannerError.InvalidQuery;
 
-        // If we have literal query text, use FtsSearchWithInput with literal
         if (info.query_text) |query_text| {
-            // Use FtsSearchWithInput which filters FTS results against the input operator
-            // This ensures MATCH constraints (like labels) are respected
             const fts_search = fts_ops.FtsSearchWithInput.initWithLiteral(
                 self.allocator,
                 input,
@@ -955,6 +1015,8 @@ pub const QueryPlanner = struct {
                 query_text,
                 100, // Default limit
                 database,
+                label,
+                property,
             ) catch {
                 return PlannerError.OutOfMemory;
             };
@@ -962,7 +1024,6 @@ pub const QueryPlanner = struct {
             return fts_search.operator();
         }
 
-        // Use parameter-based search with input operator
         const param_name = info.param_name orelse return PlannerError.InvalidQuery;
 
         const fts_search = fts_ops.FtsSearchWithInput.init(
@@ -972,6 +1033,8 @@ pub const QueryPlanner = struct {
             param_name,
             100, // Default limit
             database,
+            label,
+            property,
         ) catch {
             return PlannerError.OutOfMemory;
         };
@@ -1687,6 +1750,9 @@ pub const QueryPlanner = struct {
 
         // Reset bindings to WITH aliases (WITH introduces a new scope)
         self.bindings.clearRetainingCapacity();
+        // What comes through a WITH is an alias rather than a node written with a
+        // label, so the labels that were in scope before it no longer describe it.
+        self.pattern_labels.clearRetainingCapacity();
         self.next_slot = 0;
 
         for (with_clause.items, 0..) |item, i| {
@@ -2072,6 +2138,22 @@ pub const QueryPlanner = struct {
         }) catch {
             return PlannerError.OutOfMemory;
         };
+    }
+
+    fn setPlanDetail(self: *Self, comptime fmt: []const u8, args: anytype) void {
+        const written = std.fmt.bufPrint(&self.detail_buf, fmt, args) catch {
+            // A detail that does not fit is worth less than the error itself, so
+            // the caller falls back to the generic message rather than failing.
+            self.detail_len = 0;
+            return;
+        };
+        self.detail_len = written.len;
+    }
+
+    /// Why planning failed, when there is something specific to say.
+    pub fn planErrorDetail(self: *const Self) ?[]const u8 {
+        if (self.detail_len == 0) return null;
+        return self.detail_buf[0..self.detail_len];
     }
 
     /// Get the slot for a variable

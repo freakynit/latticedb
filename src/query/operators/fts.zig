@@ -171,6 +171,13 @@ pub const FtsSearchWithInput = struct {
     limit: u32,
     /// Database for txn-aware FTS search
     database: *Database,
+    /// The label of the declared index this searches
+    ///
+    /// Resolved during planning from the pattern the variable was written in, so
+    /// by the time this runs the index is known to exist.
+    label: []const u8,
+    /// The property of the declared index this searches
+    property: []const u8,
     /// Search results
     results: ?[]ScoredDoc,
     /// Current result index
@@ -194,6 +201,8 @@ pub const FtsSearchWithInput = struct {
         param_name: []const u8,
         limit: u32,
         database: *Database,
+        label: []const u8,
+        property: []const u8,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -203,6 +212,8 @@ pub const FtsSearchWithInput = struct {
             .literal_query = null,
             .limit = limit,
             .database = database,
+            .label = label,
+            .property = property,
             .results = null,
             .current_index = 0,
             .current_doc_row_index = 0,
@@ -221,6 +232,8 @@ pub const FtsSearchWithInput = struct {
         query_text: []const u8,
         limit: u32,
         database: *Database,
+        label: []const u8,
+        property: []const u8,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -230,6 +243,8 @@ pub const FtsSearchWithInput = struct {
             .literal_query = query_text,
             .limit = limit,
             .database = database,
+            .label = label,
+            .property = property,
             .results = null,
             .current_index = 0,
             .current_doc_row_index = 0,
@@ -288,7 +303,14 @@ pub const FtsSearchWithInput = struct {
         };
 
         // Perform the FTS search
-        self.results = self.database.ftsSearchInTxn(ctx.txn, query_text, self.limit) catch return OperatorError.StorageError;
+        self.results = self.database.ftsSearchIndexInTxn(
+            ctx.txn,
+            .node,
+            self.label,
+            self.property,
+            query_text,
+            self.limit,
+        ) catch return OperatorError.StorageError;
 
         // Keep only input rows whose node IDs are present in FTS results while
         // preserving full row context and multiplicity.

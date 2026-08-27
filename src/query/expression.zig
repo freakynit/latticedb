@@ -1212,12 +1212,12 @@ pub const ExpressionEvaluator = struct {
         };
     }
 
-    /// Ask the full-text index whether this row's node matches.
+    /// Ask the declared full-text index whether this row's node matches.
     ///
-    /// The left side names a node through a property access. Which property is
-    /// named does not currently select anything, because the index holds one
-    /// document per node rather than one per property; that is what declared
-    /// per-property indexes will change.
+    /// The left side names a node through a property access, and the property
+    /// selects which declared index answers. Reached when `@@` sits inside a
+    /// larger condition, so the planner could not turn the whole WHERE into a
+    /// single index scan.
     fn ftsMatchIndexed(
         self: *Self,
         b: *const ast.BinaryExpr,
@@ -1257,15 +1257,24 @@ pub const ExpressionEvaluator = struct {
         // which is why the planner prefers an index scan when it can build one.
         // Correctness first: a filter that agrees with the scan beats a fast
         // filter that disagrees with it.
-        const results = database.ftsSearchInTxn(ctx.txn, query, FTS_FILTER_LIMIT) catch {
+        const matched = database.ftsNodeMatches(
+            ctx.txn,
+            node_id,
+            property_access.property,
+            query,
+            FTS_FILTER_LIMIT,
+        ) catch {
             return .{ .null_val = {} };
         };
-        defer database.freeFtsSearchResults(results);
 
-        for (results) |hit| {
-            if (hit.doc_id == node_id) return .{ .bool_val = true };
-        }
-        return .{ .bool_val = false };
+        // No index declared for this property on any label the node carries. The
+        // planner reports this as an error when it can see the whole condition;
+        // here the condition is a larger expression and there is no way to raise
+        // one, so the honest answer is the unknown that a null already means in
+        // three-valued logic — not a false, which would read as "searched and
+        // found nothing".
+        const answer = matched orelse return .{ .null_val = {} };
+        return .{ .bool_val = answer };
     }
 
     /// Match text against a query without involving any index.
