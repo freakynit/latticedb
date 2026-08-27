@@ -66,7 +66,12 @@ public final class Database implements AutoCloseable {
         Native.close(h);
     }
 
-    long handle() {
+    // Synchronized against close(): without this, one thread can read a
+    // live handle while another closes and frees it, leaving the first
+    // with a stale jlong. The C API's handle registry turns a freed handle
+    // into err_invalid_arg rather than a crash, but address reuse could
+    // still route an operation to a different database.
+    synchronized long handle() {
         long h = handle;
         if (h == 0) {
             throw new LatticeException(ErrorCode.ERROR, "database is not open");

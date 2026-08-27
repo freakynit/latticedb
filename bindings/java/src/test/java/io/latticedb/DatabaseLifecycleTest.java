@@ -94,6 +94,22 @@ class DatabaseLifecycleTest {
     }
 
     @Test
+    void unknownErrorCodesFallBackToCatchAll() {
+        LatticeException ex = new LatticeException(-999, "something unexpected");
+        assertEquals(ErrorCode.UNKNOWN, ex.getErrorCode());
+        assertEquals(-999, ex.getNativeCode());
+        assertTrue(ex.getMessage().contains("-999"));
+    }
+
+    @Test
+    void fileLockedErrorCodeIsMapped() {
+        LatticeException ex = new LatticeException(ErrorCode.FILE_LOCKED, "locked");
+        assertEquals(ErrorCode.FILE_LOCKED, ex.getErrorCode());
+        assertEquals(-16, ex.getNativeCode());
+        assertEquals(ErrorCode.FILE_LOCKED, ErrorCode.fromCode(-16));
+    }
+
+    @Test
     void optionsDefaultsMatchGoBinding() {
         OpenOptions opts = OpenOptions.defaults();
         assertEquals(OpenOptions.defaults(), opts);
