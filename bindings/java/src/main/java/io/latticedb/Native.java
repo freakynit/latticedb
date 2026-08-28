@@ -19,7 +19,14 @@ final class Native {
     static native long open(String path, boolean create, boolean readOnly,
                             int cacheSizeMB, int pageSize, boolean enableVector,
                             int vectorDimensions, boolean enableWal,
-                            boolean enableAdjacencyCache);
+                            boolean enableAdjacencyCache, boolean lock);
+
+    static native byte[] serialize(long db);
+
+    static native long deserialize(byte[] bytes, int cacheSizeMB, int pageSize,
+                                   boolean enableVector, int vectorDimensions,
+                                   boolean enableWal, boolean enableAdjacencyCache,
+                                   boolean lock);
 
     static native void close(long db);
 

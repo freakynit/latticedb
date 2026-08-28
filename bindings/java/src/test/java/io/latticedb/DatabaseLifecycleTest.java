@@ -102,20 +102,72 @@ class DatabaseLifecycleTest {
     }
 
     @Test
-    void fileLockedErrorCodeIsMapped() {
-        LatticeException ex = new LatticeException(ErrorCode.FILE_LOCKED, "locked");
-        assertEquals(ErrorCode.FILE_LOCKED, ex.getErrorCode());
+    void databaseLockedErrorCodeIsMapped() {
+        LatticeException ex = new LatticeException(ErrorCode.DATABASE_LOCKED, "locked");
+        assertEquals(ErrorCode.DATABASE_LOCKED, ex.getErrorCode());
         assertEquals(-16, ex.getNativeCode());
-        assertEquals(ErrorCode.FILE_LOCKED, ErrorCode.fromCode(-16));
+        assertEquals(ErrorCode.DATABASE_LOCKED, ErrorCode.fromCode(-16));
     }
 
     @Test
     void optionsDefaultsMatchGoBinding() {
         OpenOptions opts = OpenOptions.defaults();
         assertEquals(OpenOptions.defaults(), opts);
+        assertTrue(opts.lock());
+        assertNotEquals(opts, OpenOptions.defaults().lock(false));
         assertThrows(IllegalArgumentException.class,
                 () -> opts.vectorDimensions(0));
         assertThrows(IllegalArgumentException.class,
                 () -> opts.vectorDimensions(5000));
+    }
+
+    @Test
+    void serializeDeserializeRoundTripIsIndependent() {
+        byte[] snapshot;
+        try (Database db = Database.open(dbPath(), OpenOptions.defaults().create(true))) {
+            db.write(txn -> {
+                txn.createNode(java.util.List.of("Thing"),
+                        java.util.Map.of("name", "before"));
+                return null;
+            });
+            snapshot = db.serialize();
+            assertTrue(snapshot.length > 0);
+
+            db.write(txn -> {
+                txn.createNode(java.util.List.of("Thing"),
+                        java.util.Map.of("name", "after"));
+                return null;
+            });
+        }
+
+        byte[] originalSnapshot = snapshot.clone();
+        try (Database restored = Database.deserialize(snapshot)) {
+            assertEquals("<deserialized>", restored.getPath());
+            long count = restored.read(txn -> (long) txn.query(
+                    "MATCH (n:Thing) RETURN count(n) AS c").rows().get(0).get("c"));
+            assertEquals(1L, count);
+
+            restored.write(txn -> {
+                txn.createNode(java.util.List.of("Thing"));
+                return null;
+            });
+            assertArrayEquals(originalSnapshot, snapshot);
+        }
+    }
+
+    @Test
+    void serializeRejectsAnOpenTransaction() {
+        try (Database db = Database.open(dbPath(), OpenOptions.defaults().create(true));
+             Transaction ignored = db.beginRead()) {
+            LatticeException ex = assertThrows(LatticeException.class, db::serialize);
+            assertEquals(ErrorCode.LOCK_TIMEOUT, ex.getErrorCode());
+        }
+    }
+
+    @Test
+    void deserializeRejectsInvalidBytes() {
+        LatticeException ex = assertThrows(LatticeException.class,
+                () -> Database.deserialize(new byte[] {1, 2, 3}));
+        assertEquals(ErrorCode.CORRUPTION, ex.getErrorCode());
     }
 }

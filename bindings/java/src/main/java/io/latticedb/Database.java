@@ -5,6 +5,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
+import java.util.Objects;
 
 /**
  * An open LatticeDB database.
@@ -44,8 +45,27 @@ public final class Database implements AutoCloseable {
         long handle = Native.open(path, options.create(), options.readOnly(),
                 options.cacheSizeMB(), options.pageSize(), options.enableVectors(),
                 options.vectorDimensions(), options.enableWal(),
-                options.enableAdjacencyCache());
+                options.enableAdjacencyCache(), options.lock());
         return new Database(path, options, handle);
+    }
+
+    /** Opens an in-memory database from bytes produced by {@link #serialize()}. */
+    public static Database deserialize(byte[] bytes) {
+        return deserialize(bytes, OpenOptions.defaults());
+    }
+
+    /**
+     * Opens an in-memory database from bytes produced by {@link #serialize()}.
+     * The bytes are copied, so the caller may reuse or discard them after this
+     * method returns. Changes do not affect the input array.
+     */
+    public static Database deserialize(byte[] bytes, OpenOptions options) {
+        Objects.requireNonNull(bytes, "bytes");
+        Objects.requireNonNull(options, "options");
+        long handle = Native.deserialize(bytes, options.cacheSizeMB(), options.pageSize(),
+                options.enableVectors(), options.vectorDimensions(), options.enableWal(),
+                options.enableAdjacencyCache(), options.lock());
+        return new Database("<deserialized>", options, handle);
     }
 
     public String getPath() {
@@ -77,6 +97,15 @@ public final class Database implements AutoCloseable {
             throw new LatticeException(ErrorCode.ERROR, "database is not open");
         }
         return h;
+    }
+
+    /**
+     * Returns the complete database file as bytes, including pending WAL data.
+     * Serialization fails with {@link ErrorCode#LOCK_TIMEOUT} while a
+     * transaction is open.
+     */
+    public byte[] serialize() {
+        return Native.serialize(handle());
     }
 
     /* ------------------------------------------------------------------ */

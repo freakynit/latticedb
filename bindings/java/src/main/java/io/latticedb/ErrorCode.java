@@ -21,7 +21,7 @@ public enum ErrorCode {
     /** Another process holds the database file (native code -16, added in
      * 0.13.0). Distinct from {@link #LOCK_TIMEOUT}, which reports a second
      * writer inside this process. */
-    FILE_LOCKED(-16),
+    DATABASE_LOCKED(-16),
     /** Placeholder for native codes this binding does not recognize. The
      * original numeric code is preserved on the exception that carries it
      * (see {@link LatticeException#getNativeCode()}). */

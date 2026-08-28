@@ -32,12 +32,31 @@ static jmethodID MID_LHM_INIT = NULL;
 static jmethodID MID_LHM_PUT = NULL;
 static jclass CLS_BOOL = NULL;
 static jmethodID MID_BOOL_INIT = NULL;
+static jmethodID MID_BOOL_VALUE = NULL;
 static jclass CLS_LONG = NULL;
 static jmethodID MID_LONG_INIT = NULL;
 static jclass CLS_DOUBLE = NULL;
 static jmethodID MID_DOUBLE_INIT = NULL;
+static jclass CLS_FLOAT = NULL;
 static jclass CLS_INTEGER = NULL;
 static jmethodID MID_INT_INIT = NULL;
+static jclass CLS_NUMBER = NULL;
+static jmethodID MID_NUMBER_DOUBLE_VALUE = NULL;
+static jmethodID MID_NUMBER_LONG_VALUE = NULL;
+static jclass CLS_BYTE_ARRAY = NULL;
+static jclass CLS_FLOAT_ARRAY = NULL;
+static jclass CLS_LIST = NULL;
+static jclass CLS_COLLECTION = NULL;
+static jmethodID MID_COLLECTION_ITERATOR = NULL;
+static jclass CLS_ITERATOR = NULL;
+static jmethodID MID_ITERATOR_HAS_NEXT = NULL;
+static jmethodID MID_ITERATOR_NEXT = NULL;
+static jclass CLS_MAP = NULL;
+static jmethodID MID_MAP_ENTRY_SET = NULL;
+static jclass CLS_MAP_ENTRY = NULL;
+static jmethodID MID_MAP_ENTRY_GET_KEY = NULL;
+static jmethodID MID_MAP_ENTRY_GET_VALUE = NULL;
+static jclass CLS_OBJECT = NULL;
 
 static void init_cache(JNIEnv *env) {
     if (CLS_LATTICE_EXCEPTION != NULL) {
@@ -57,12 +76,10 @@ static void init_cache(JNIEnv *env) {
     jclass str = (*env)->FindClass(env, "java/lang/String");
     if (str == NULL) return;
     CLS_STRING = (*env)->NewGlobalRef(env, str);
-    jstring charset = (*env)->NewStringUTF(env, "UTF-8");
     MID_GET_BYTES_UTF8 = (*env)->GetMethodID(env, str, "getBytes",
         "(Ljava/lang/String;)[B");
     MID_STRING_NEW_UTF8 = (*env)->GetMethodID(env, str, "<init>",
         "([BLjava/lang/String;)V");
-    if (charset != NULL) (*env)->DeleteLocalRef(env, charset);
 
     jclass al = (*env)->FindClass(env, "java/util/ArrayList");
     if (al == NULL) return;
@@ -89,6 +106,55 @@ static void init_cache(JNIEnv *env) {
     CACHE_BOX(CLS_DOUBLE, MID_DOUBLE_INIT, "java/lang/Double", "(D)V");
     CACHE_BOX(CLS_INTEGER, MID_INT_INIT, "java/lang/Integer", "(I)V");
 #undef CACHE_BOX
+
+#define CACHE_CLASS(cls_var, name)                                        \
+    do {                                                                   \
+        jclass c = (*env)->FindClass(env, name);                            \
+        if (c == NULL) return;                                              \
+        cls_var = (*env)->NewGlobalRef(env, c);                             \
+    } while (0)
+    CACHE_CLASS(CLS_FLOAT, "java/lang/Float");
+    CACHE_CLASS(CLS_NUMBER, "java/lang/Number");
+    CACHE_CLASS(CLS_BYTE_ARRAY, "[B");
+    CACHE_CLASS(CLS_FLOAT_ARRAY, "[F");
+    CACHE_CLASS(CLS_LIST, "java/util/List");
+    CACHE_CLASS(CLS_COLLECTION, "java/util/Collection");
+    CACHE_CLASS(CLS_ITERATOR, "java/util/Iterator");
+    CACHE_CLASS(CLS_MAP, "java/util/Map");
+    CACHE_CLASS(CLS_MAP_ENTRY, "java/util/Map$Entry");
+    CACHE_CLASS(CLS_OBJECT, "java/lang/Object");
+#undef CACHE_CLASS
+
+    MID_BOOL_VALUE = (*env)->GetMethodID(env, CLS_BOOL, "booleanValue", "()Z");
+    MID_NUMBER_DOUBLE_VALUE = (*env)->GetMethodID(env, CLS_NUMBER,
+        "doubleValue", "()D");
+    MID_NUMBER_LONG_VALUE = (*env)->GetMethodID(env, CLS_NUMBER,
+        "longValue", "()J");
+    MID_COLLECTION_ITERATOR = (*env)->GetMethodID(env, CLS_COLLECTION,
+        "iterator", "()Ljava/util/Iterator;");
+    MID_ITERATOR_HAS_NEXT = (*env)->GetMethodID(env, CLS_ITERATOR,
+        "hasNext", "()Z");
+    MID_ITERATOR_NEXT = (*env)->GetMethodID(env, CLS_ITERATOR,
+        "next", "()Ljava/lang/Object;");
+    MID_MAP_ENTRY_SET = (*env)->GetMethodID(env, CLS_MAP, "entrySet",
+        "()Ljava/util/Set;");
+    MID_MAP_ENTRY_GET_KEY = (*env)->GetMethodID(env, CLS_MAP_ENTRY,
+        "getKey", "()Ljava/lang/Object;");
+    MID_MAP_ENTRY_GET_VALUE = (*env)->GetMethodID(env, CLS_MAP_ENTRY,
+        "getValue", "()Ljava/lang/Object;");
+}
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_8) != JNI_OK) {
+        return JNI_ERR;
+    }
+    init_cache(env);
+    if ((*env)->ExceptionCheck(env)) {
+        return JNI_ERR;
+    }
+    return JNI_VERSION_1_8;
 }
 
 /* Throw LatticeException(code, message). Always returns a default value
@@ -250,30 +316,25 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
     }
 
     /* Boolean */
-    jclass bcls = (*env)->FindClass(env, "java/lang/Boolean");
-    if ((*env)->IsInstanceOf(env, value, bcls)) {
+    if ((*env)->IsInstanceOf(env, value, CLS_BOOL)) {
         memset(dst, 0, sizeof(*dst));
         dst->type = LATTICE_VALUE_BOOL;
-        jmethodID bv = (*env)->GetMethodID(env, bcls, "booleanValue", "()Z");
-        dst->data.bool_val = (*env)->CallBooleanMethod(env, value, bv);
+        dst->data.bool_val = (*env)->CallBooleanMethod(env, value, MID_BOOL_VALUE);
         return 1;
     }
 
     /* Numbers: integral types -> INT, floating types -> FLOAT */
-    jclass ncls = (*env)->FindClass(env, "java/lang/Number");
-    if ((*env)->IsInstanceOf(env, value, ncls)) {
+    if ((*env)->IsInstanceOf(env, value, CLS_NUMBER)) {
         memset(dst, 0, sizeof(*dst));
-        jclass dcls = (*env)->FindClass(env, "java/lang/Double");
-        jclass fcls = (*env)->FindClass(env, "java/lang/Float");
-        if ((*env)->IsInstanceOf(env, value, dcls) ||
-            (*env)->IsInstanceOf(env, value, fcls)) {
+        if ((*env)->IsInstanceOf(env, value, CLS_DOUBLE) ||
+            (*env)->IsInstanceOf(env, value, CLS_FLOAT)) {
             dst->type = LATTICE_VALUE_FLOAT;
-            jmethodID dv = (*env)->GetMethodID(env, ncls, "doubleValue", "()D");
-            dst->data.float_val = (*env)->CallDoubleMethod(env, value, dv);
+            dst->data.float_val = (*env)->CallDoubleMethod(env, value,
+                                                            MID_NUMBER_DOUBLE_VALUE);
         } else {
             dst->type = LATTICE_VALUE_INT;
-            jmethodID lv = (*env)->GetMethodID(env, ncls, "longValue", "()J");
-            dst->data.int_val = (*env)->CallLongMethod(env, value, lv);
+            dst->data.int_val = (*env)->CallLongMethod(env, value,
+                                                        MID_NUMBER_LONG_VALUE);
         }
         return 1;
     }
@@ -284,8 +345,7 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
     }
 
     /* byte[] -> BYTES */
-    jclass byteArr = (*env)->FindClass(env, "[B");
-    if ((*env)->IsInstanceOf(env, value, byteArr)) {
+    if ((*env)->IsInstanceOf(env, value, CLS_BYTE_ARRAY)) {
         jbyteArray arr = (jbyteArray)value;
         jsize len = (*env)->GetArrayLength(env, arr);
         uint8_t *buf = NULL;
@@ -302,8 +362,7 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
     }
 
     /* float[] -> VECTOR */
-    jclass floatArr = (*env)->FindClass(env, "[F");
-    if ((*env)->IsInstanceOf(env, value, floatArr)) {
+    if ((*env)->IsInstanceOf(env, value, CLS_FLOAT_ARRAY)) {
         jfloatArray arr = (jfloatArray)value;
         jsize len = (*env)->GetArrayLength(env, arr);
         float *buf = NULL;
@@ -320,17 +379,9 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
     }
 
     /* java.util.List -> LIST */
-    jclass listCls = (*env)->FindClass(env, "java/util/List");
-    if ((*env)->IsInstanceOf(env, value, listCls)) {
+    if ((*env)->IsInstanceOf(env, value, CLS_LIST)) {
         jobject iter = NULL;
-        jclass collCls = (*env)->FindClass(env, "java/util/Collection");
-        jmethodID iteratorM = (*env)->GetMethodID(env, collCls, "iterator",
-                                                  "()Ljava/util/Iterator;");
-        jmethodID hasNextM = NULL, nextM = NULL;
-        jclass iterCls = (*env)->FindClass(env, "java/util/Iterator");
-        hasNextM = (*env)->GetMethodID(env, iterCls, "hasNext", "()Z");
-        nextM = (*env)->GetMethodID(env, iterCls, "next", "()Ljava/lang/Object;");
-        iter = (*env)->CallObjectMethod(env, value, iteratorM);
+        iter = (*env)->CallObjectMethod(env, value, MID_COLLECTION_ITERATOR);
 
         lattice_list *list = (lattice_list *)calloc(1, sizeof(lattice_list));
         if (list == NULL) {
@@ -344,8 +395,8 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
             throw_lattice(env, LATTICE_ERROR_OUT_OF_MEMORY);
             return 0;
         }
-        while ((*env)->CallBooleanMethod(env, iter, hasNextM)) {
-            jobject item = (*env)->CallObjectMethod(env, iter, nextM);
+        while ((*env)->CallBooleanMethod(env, iter, MID_ITERATOR_HAS_NEXT)) {
+            jobject item = (*env)->CallObjectMethod(env, iter, MID_ITERATOR_NEXT);
             if (list->len == cap) {
                 cap *= 2;
                 lattice_value *grown = (lattice_value *)
@@ -372,23 +423,9 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
     }
 
     /* java.util.Map -> MAP */
-    jclass mapCls = (*env)->FindClass(env, "java/util/Map");
-    if ((*env)->IsInstanceOf(env, value, mapCls)) {
-        jmethodID entrySetM = (*env)->GetMethodID(env, mapCls, "entrySet",
-                                                  "()Ljava/util/Set;");
-        jobject entrySet = (*env)->CallObjectMethod(env, value, entrySetM);
-        jclass setCls = (*env)->FindClass(env, "java/util/Set");
-        jmethodID iteratorM = (*env)->GetMethodID(env, setCls, "iterator",
-                                                  "()Ljava/util/Iterator;");
-        jclass iterCls = (*env)->FindClass(env, "java/util/Iterator");
-        jmethodID hasNextM = (*env)->GetMethodID(env, iterCls, "hasNext", "()Z");
-        jmethodID nextM = (*env)->GetMethodID(env, iterCls, "next", "()Ljava/lang/Object;");
-        jclass entryCls = (*env)->FindClass(env, "java/util/Map$Entry");
-        jmethodID getKeyM = (*env)->GetMethodID(env, entryCls, "getKey",
-                                                "()Ljava/lang/Object;");
-        jmethodID getValueM = (*env)->GetMethodID(env, entryCls, "getValue",
-                                                  "()Ljava/lang/Object;");
-        jobject iter = (*env)->CallObjectMethod(env, entrySet, iteratorM);
+    if ((*env)->IsInstanceOf(env, value, CLS_MAP)) {
+        jobject entrySet = (*env)->CallObjectMethod(env, value, MID_MAP_ENTRY_SET);
+        jobject iter = (*env)->CallObjectMethod(env, entrySet, MID_COLLECTION_ITERATOR);
 
         lattice_map *map = (lattice_map *)calloc(1, sizeof(lattice_map));
         if (map == NULL) {
@@ -402,10 +439,10 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
             throw_lattice(env, LATTICE_ERROR_OUT_OF_MEMORY);
             return 0;
         }
-        while ((*env)->CallBooleanMethod(env, iter, hasNextM)) {
-            jobject entry = (*env)->CallObjectMethod(env, iter, nextM);
-            jobject key_obj = (*env)->CallObjectMethod(env, entry, getKeyM);
-            jobject val = (*env)->CallObjectMethod(env, entry, getValueM);
+        while ((*env)->CallBooleanMethod(env, iter, MID_ITERATOR_HAS_NEXT)) {
+            jobject entry = (*env)->CallObjectMethod(env, iter, MID_ITERATOR_NEXT);
+            jobject key_obj = (*env)->CallObjectMethod(env, entry, MID_MAP_ENTRY_GET_KEY);
+            jobject val = (*env)->CallObjectMethod(env, entry, MID_MAP_ENTRY_GET_VALUE);
             if (key_obj == NULL || !(*env)->IsInstanceOf(env, key_obj, CLS_STRING)) {
                 map->len = count;
                 free_map(map);
@@ -564,10 +601,10 @@ JNIEXPORT jlong JNICALL
 Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
         jboolean create, jboolean read_only, jint cache_size_mb, jint page_size,
         jboolean enable_vector, jint vector_dimensions, jboolean enable_wal,
-        jboolean enable_adjacency_cache) {
+        jboolean enable_adjacency_cache, jboolean lock) {
     init_cache(env);
     (void)cls;
-    lattice_open_options_v3 opts;
+    lattice_open_options_v4 opts;
     memset(&opts, 0, sizeof(opts));
     opts.struct_size = sizeof(opts);
     opts.create = create == JNI_TRUE;
@@ -578,14 +615,81 @@ Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
     opts.vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;
     opts.enable_wal = enable_wal == JNI_TRUE;
     opts.enable_adjacency_cache = enable_adjacency_cache == JNI_TRUE;
+    opts.lock = lock == JNI_TRUE;
 
     size_t path_len = 0;
     char *path_buf = jstring_to_utf8(env, path, &path_len);
     if (path_buf == NULL && (*env)->ExceptionCheck(env)) return 0;
 
     lattice_database *db = NULL;
-    lattice_error rc = lattice_open_v3(path_buf, &opts, &db);
+    lattice_error rc = lattice_open_v4(path_buf, &opts, &db);
     free(path_buf);
+    if (!check(env, rc)) return 0;
+    return (jlong)(uintptr_t)db;
+}
+
+JNIEXPORT jbyteArray JNICALL
+Java_io_latticedb_Native_serialize(JNIEnv *env, jclass cls, jlong db_handle) {
+    init_cache(env);
+    (void)cls;
+    uint8_t *bytes = NULL;
+    size_t len = 0;
+    lattice_error rc = lattice_serialize(
+        (lattice_database *)(uintptr_t)db_handle, &bytes, &len);
+    if (!check(env, rc)) return NULL;
+    if (len > INT32_MAX) {
+        lattice_free_bytes(bytes, len);
+        throw_lattice(env, LATTICE_ERROR_VALUE_TOO_LARGE);
+        return NULL;
+    }
+
+    jbyteArray out = (*env)->NewByteArray(env, (jsize)len);
+    if (out == NULL) {
+        lattice_free_bytes(bytes, len);
+        return NULL;
+    }
+    if (len > 0) {
+        (*env)->SetByteArrayRegion(env, out, 0, (jsize)len, (const jbyte *)bytes);
+    }
+    lattice_free_bytes(bytes, len);
+    return out;
+}
+
+JNIEXPORT jlong JNICALL
+Java_io_latticedb_Native_deserialize(JNIEnv *env, jclass cls, jbyteArray bytes,
+        jint cache_size_mb, jint page_size, jboolean enable_vector,
+        jint vector_dimensions, jboolean enable_wal,
+        jboolean enable_adjacency_cache, jboolean lock) {
+    init_cache(env);
+    (void)cls;
+    if (bytes == NULL) {
+        throw_lattice(env, LATTICE_ERROR_INVALID_ARG);
+        return 0;
+    }
+
+    lattice_open_options_v4 opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.struct_size = sizeof(opts);
+    opts.create = false;
+    opts.read_only = false;
+    opts.cache_size_mb = cache_size_mb <= 0 ? 100 : (uint32_t)cache_size_mb;
+    opts.page_size = page_size <= 0 ? 4096 : (uint32_t)page_size;
+    opts.enable_vector = enable_vector == JNI_TRUE;
+    opts.vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;
+    opts.enable_wal = enable_wal == JNI_TRUE;
+    opts.enable_adjacency_cache = enable_adjacency_cache == JNI_TRUE;
+    opts.lock = lock == JNI_TRUE;
+
+    jsize len = (*env)->GetArrayLength(env, bytes);
+    jbyte *data = len > 0 ? (*env)->GetByteArrayElements(env, bytes, NULL) : NULL;
+    if (len > 0 && data == NULL) return 0;
+
+    lattice_database *db = NULL;
+    lattice_error rc = lattice_deserialize(
+        (const uint8_t *)data, (size_t)len, &opts, &db);
+    if (data != NULL) {
+        (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);
+    }
     if (!check(env, rc)) return 0;
     return (jlong)(uintptr_t)db;
 }
@@ -1155,8 +1259,7 @@ static jobjectArray fetch_edges(JNIEnv *env, jlong txn_handle, jint which,
     if (n > 0) (*env)->SetLongArrayRegion(env, idsArr, 0, (jsize)(3 * n), triples);
     free(triples);
 
-    jobjectArray out = (*env)->NewObjectArray(env, 2,
-        (*env)->FindClass(env, "java/lang/Object"), NULL);
+    jobjectArray out = (*env)->NewObjectArray(env, 2, CLS_OBJECT, NULL);
     if (out == NULL) return NULL;
     (*env)->SetObjectArrayElement(env, out, 0, idsArr);
     (*env)->SetObjectArrayElement(env, out, 1, types);
@@ -1254,8 +1357,7 @@ static jobject search_vectors(JNIEnv *env, jlong db_handle, jlong txn_handle,
         (*env)->SetFloatArrayRegion(env, distsArr, 0, (jsize)n, dists);
     }
     free(ids); free(dists);
-    jobjectArray out = (*env)->NewObjectArray(env, 2,
-        (*env)->FindClass(env, "java/lang/Object"), NULL);
+    jobjectArray out = (*env)->NewObjectArray(env, 2, CLS_OBJECT, NULL);
     if (out == NULL) return NULL;
     (*env)->SetObjectArrayElement(env, out, 0, idsArr);
     (*env)->SetObjectArrayElement(env, out, 1, distsArr);
@@ -1355,8 +1457,7 @@ static jobject fts_search(JNIEnv *env, jlong db_handle, jlong txn_handle, jint u
         (*env)->SetFloatArrayRegion(env, scoresArr, 0, (jsize)n, scores);
     }
     free(ids); free(scores);
-    jobjectArray out = (*env)->NewObjectArray(env, 2,
-        (*env)->FindClass(env, "java/lang/Object"), NULL);
+    jobjectArray out = (*env)->NewObjectArray(env, 2, CLS_OBJECT, NULL);
     if (out == NULL) return NULL;
     (*env)->SetObjectArrayElement(env, out, 0, idsArr);
     (*env)->SetObjectArrayElement(env, out, 1, scoresArr);
@@ -1462,8 +1563,7 @@ Java_io_latticedb_Native_streamRead(JNIEnv *env, jclass cls, jlong db_handle,
     size_t n = batch ? lattice_stream_batch_count(batch) : 0;
     jlong *seqs = (jlong *)malloc(sizeof(jlong) * (n > 0 ? n : 1));
     jobjectArray kinds = (*env)->NewObjectArray(env, (jsize)n, CLS_STRING, NULL);
-    jobjectArray payloads = (*env)->NewObjectArray(env, (jsize)n,
-        (*env)->FindClass(env, "java/lang/Object"), NULL);
+    jobjectArray payloads = (*env)->NewObjectArray(env, (jsize)n, CLS_OBJECT, NULL);
     if (seqs == NULL || kinds == NULL || payloads == NULL) {
         free(seqs); lattice_stream_batch_free(batch);
         throw_lattice(env, LATTICE_ERROR_OUT_OF_MEMORY);
@@ -1494,8 +1594,7 @@ Java_io_latticedb_Native_streamRead(JNIEnv *env, jclass cls, jlong db_handle,
     if (n > 0) (*env)->SetLongArrayRegion(env, seqsArr, 0, (jsize)n, seqs);
     free(seqs);
 
-    jobjectArray out = (*env)->NewObjectArray(env, 3,
-        (*env)->FindClass(env, "java/lang/Object"), NULL);
+    jobjectArray out = (*env)->NewObjectArray(env, 3, CLS_OBJECT, NULL);
     if (out == NULL) return NULL;
     (*env)->SetObjectArrayElement(env, out, 0, seqsArr);
     (*env)->SetObjectArrayElement(env, out, 1, kinds);
@@ -1519,8 +1618,7 @@ Java_io_latticedb_Native_streamGetOffset(JNIEnv *env, jclass cls, jlong db_handl
     free(s); free(c);
     if (!check(env, rc)) return NULL;
 
-    jobjectArray out = (*env)->NewObjectArray(env, 2,
-        (*env)->FindClass(env, "java/lang/Object"), NULL);
+    jobjectArray out = (*env)->NewObjectArray(env, 2, CLS_OBJECT, NULL);
     if (out == NULL) return NULL;
     jobject off = (*env)->NewObject(env, CLS_LONG, MID_LONG_INIT, (jlong)sequence);
     jobject bex = (*env)->NewObject(env, CLS_BOOL, MID_BOOL_INIT,
@@ -1723,8 +1821,7 @@ Java_io_latticedb_Native_cacheStats(JNIEnv *env, jclass cls, jlong db_handle) {
     lattice_error rc = lattice_query_cache_stats(
         (lattice_database *)(uintptr_t)db_handle, &entries, &hits, &misses);
     if (!check(env, rc)) return NULL;
-    jobjectArray out = (*env)->NewObjectArray(env, 3,
-        (*env)->FindClass(env, "java/lang/Object"), NULL);
+    jobjectArray out = (*env)->NewObjectArray(env, 3, CLS_OBJECT, NULL);
     if (out == NULL) return NULL;
     jobject e = (*env)->NewObject(env, CLS_INTEGER, MID_INT_INIT, (jint)entries);
     jobject h = (*env)->NewObject(env, CLS_LONG, MID_LONG_INIT, (jlong)hits);

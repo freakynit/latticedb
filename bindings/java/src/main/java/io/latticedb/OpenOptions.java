@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /**
  * Options for opening a database, mirroring the Go binding's OpenOptions and
- * the native {@code lattice_open_options_v3} struct. All values have sane
+ * the native {@code lattice_open_options_v4} struct. All values have sane
  * defaults; use the builder to override them.
  */
 public final class OpenOptions {
@@ -16,6 +16,7 @@ public final class OpenOptions {
     private int vectorDimensions = 128;
     private boolean enableWal = true;
     private boolean enableAdjacencyCache = false;
+    private boolean lock = true;
 
     private OpenOptions() {
     }
@@ -71,6 +72,17 @@ public final class OpenOptions {
         return this;
     }
 
+    /**
+     * Take a lock on the database file. Default true.
+     *
+     * <p>Turn this off only for filesystems where locking does not work; it
+     * does not make concurrent access safe.</p>
+     */
+    public OpenOptions lock(boolean lock) {
+        this.lock = lock;
+        return this;
+    }
+
     boolean create() { return create; }
     boolean readOnly() { return readOnly; }
     int cacheSizeMB() { return cacheSizeMB; }
@@ -79,6 +91,7 @@ public final class OpenOptions {
     int vectorDimensions() { return vectorDimensions; }
     boolean enableWal() { return enableWal; }
     boolean enableAdjacencyCache() { return enableAdjacencyCache; }
+    boolean lock() { return lock; }
 
     @Override
     public boolean equals(Object o) {
@@ -88,12 +101,13 @@ public final class OpenOptions {
                 && enableVectors == other.enableVectors
                 && vectorDimensions == other.vectorDimensions
                 && enableWal == other.enableWal
-                && enableAdjacencyCache == other.enableAdjacencyCache;
+                && enableAdjacencyCache == other.enableAdjacencyCache
+                && lock == other.lock;
     }
 
     @Override
     public int hashCode() {
         return Objects.hash(create, readOnly, cacheSizeMB, pageSize, enableVectors,
-                vectorDimensions, enableWal, enableAdjacencyCache);
+                vectorDimensions, enableWal, enableAdjacencyCache, lock);
     }
 }

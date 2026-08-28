@@ -48,6 +48,15 @@ try (Database db = Database.open("knowledge.db",
     List<VectorSearchResult> near = db.vectorSearch(Embedding.hashEmbed("text", 128),
             VectorSearchOptions.defaults().k(5));
 }
+
+// A snapshot can be stored anywhere and reopened without a file path.
+byte[] snapshot;
+try (Database db = Database.open("knowledge.db")) {
+    snapshot = db.serialize();
+}
+try (Database restored = Database.deserialize(snapshot)) {
+    // use the independent in-memory database
+}
 ```
 
 Run the complete knowledge-graph example after building the shared library:
@@ -58,7 +67,7 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
 
 ## API overview
 
-- `Database`: open/close, `beginRead`/`beginWrite`, `read`/`write` (auto-managed
+- `Database`: open/close, serialize/deserialize, `beginRead`/`beginWrite`, `read`/`write` (auto-managed
   transactions), `query`, `vectorSearch`, `ftsSearch`/`ftsSearchFuzzy`,
   `getNodesByLabel`, property-index create/drop, durable streams
   (`readStream`, `getLastSequence`, `getStreamOffset`, `changes`),
