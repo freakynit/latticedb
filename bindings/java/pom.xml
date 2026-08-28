@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.latticedb</groupId>
+  <artifactId>latticedb</artifactId>
+  <version>0.14.0</version>
+  <packaging>jar</packaging>
+
+  <name>LatticeDB Java Bindings</name>
+  <description>Java bindings for LatticeDB, an embedded property-graph database with native vector and full-text indexing.</description>
+
+  <properties>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Location of the native LatticeDB library (liblattice) produced by
+         `zig build` at the repository root. Override with -Dlattice.lib.dir=. -->
+    <lattice.lib.dir>${basedir}/../../zig-out/lib</lattice.lib.dir>
+    <native.output.dir>${project.build.directory}/native</native.output.dir>
+    <jni.include.os>linux</jni.include.os>
+    <native.library.extension>so</native.library.extension>
+    <native.rpath>$ORIGIN</native.rpath>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.10.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+
+      <!-- Compile the JNI bridge and stage it next to liblattice so the
+           platform-relative rpath resolves without environment variables. -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.2.0</version>
+        <executions>
+          <execution>
+            <id>create-native-output-directory</id>
+            <phase>process-classes</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>mkdir</executable>
+              <arguments>
+                <argument>-p</argument>
+                <argument>${native.output.dir}</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>build-native</id>
+            <phase>process-classes</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>cc</executable>
+              <arguments>
+                <argument>-shared</argument>
+                <argument>-fPIC</argument>
+                <argument>-O2</argument>
+                <argument>-Wall</argument>
+                <argument>-I${java.home}/include</argument>
+                <argument>-I${java.home}/include/${jni.include.os}</argument>
+                <argument>-I../../include</argument>
+                <argument>-I${lattice.lib.dir}/../include</argument>
+                <argument>native/lattice_jni.c</argument>
+                <argument>-L${lattice.lib.dir}</argument>
+                <argument>-llattice</argument>
+                <argument>-Wl,-rpath,${native.rpath}</argument>
+                <argument>-o${native.output.dir}/liblattice_jni.${native.library.extension}</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>run-example</id>
+            <goals><goal>java</goal></goals>
+            <configuration>
+              <mainClass>io.latticedb.examples.KnowledgeGraphExample</mainClass>
+              <systemProperties>
+                <systemProperty><key>latticedb.native.dir</key><value>${native.output.dir}</value></systemProperty>
+              </systemProperties>
+            </configuration>
+          </execution>
+          <execution>
+            <id>stage-native</id>
+            <phase>process-classes</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>cp</executable>
+              <arguments>
+                <argument>${lattice.lib.dir}/liblattice.${native.library.extension}</argument>
+                <argument>${native.output.dir}/</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <configuration>
+          <systemPropertyVariables>
+            <latticedb.native.dir>${native.output.dir}</latticedb.native.dir>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <id>macos-native</id>
+      <activation>
+        <os><family>mac</family></os>
+      </activation>
+      <properties>
+        <jni.include.os>darwin</jni.include.os>
+        <native.library.extension>dylib</native.library.extension>
+        <native.rpath>@loader_path</native.rpath>
+      </properties>
+    </profile>
+  </profiles>
+</project>
