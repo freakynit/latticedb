@@ -173,26 +173,36 @@ pub const FtsSearch = struct {
 /// predicate, same data, two answers depending on where it sat.
 pub const NO_RESULT_LIMIT: u32 = std.math.maxInt(u32);
 
+/// One `x.property @@ query` to run.
+///
+/// The label and property are resolved during planning from the pattern the
+/// variable was written in, so by the time the operator runs the index is known
+/// to exist.
+pub const Search = struct {
+    label: []const u8,
+    property: []const u8,
+    /// Parameter name holding the query text, for `@@ $param`
+    param_name: ?[]const u8 = null,
+    /// Literal query text, for `@@ "text"`
+    literal_query: ?[]const u8 = null,
+};
+
 pub const FtsSearchWithInput = struct {
     /// Input operator - used to filter FTS results
     input: Operator,
     /// Slot to read node IDs from input (and output results to)
     output_slot: u8,
-    /// Parameter name containing query text (null for literal queries)
-    param_name: ?[]const u8,
-    /// Literal query text (null for parameter queries)
-    literal_query: ?[]const u8,
+    /// The searches whose results this unions.
+    ///
+    /// One entry for a plain `x.p @@ q`, several for a disjunction of them. A
+    /// disjunction planned as one operator reads each index once. Left to the row
+    /// filter it searches an index per candidate row, which is quadratic for a
+    /// term most documents contain.
+    searches: []const Search,
     /// Maximum results
     limit: u32,
     /// Database for txn-aware FTS search
     database: *Database,
-    /// The label of the declared index this searches
-    ///
-    /// Resolved during planning from the pattern the variable was written in, so
-    /// by the time this runs the index is known to exist.
-    label: []const u8,
-    /// The property of the declared index this searches
-    property: []const u8,
     /// Search results
     results: ?[]ScoredDoc,
     /// Current result index
@@ -208,58 +218,25 @@ pub const FtsSearchWithInput = struct {
 
     const Self = @This();
 
-    /// Create a new FtsSearchWithInput operator with parameter-based query
+    /// Create an operator over one or more searches.
+    ///
+    /// The slice belongs to the caller and must outlive the operator, which the
+    /// planner's arena guarantees.
     pub fn init(
         allocator: Allocator,
         input: Operator,
         output_slot: u8,
-        param_name: []const u8,
+        searches: []const Search,
         limit: u32,
         database: *Database,
-        label: []const u8,
-        property: []const u8,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
             .input = input,
             .output_slot = output_slot,
-            .param_name = param_name,
-            .literal_query = null,
+            .searches = searches,
             .limit = limit,
             .database = database,
-            .label = label,
-            .property = property,
-            .results = null,
-            .current_index = 0,
-            .current_doc_row_index = 0,
-            .opened = false,
-            .rows_by_doc = .{},
-            .allocator = allocator,
-        };
-        return self;
-    }
-
-    /// Create a new FtsSearchWithInput operator with literal query text
-    pub fn initWithLiteral(
-        allocator: Allocator,
-        input: Operator,
-        output_slot: u8,
-        query_text: []const u8,
-        limit: u32,
-        database: *Database,
-        label: []const u8,
-        property: []const u8,
-    ) !*Self {
-        const self = try allocator.create(Self);
-        self.* = Self{
-            .input = input,
-            .output_slot = output_slot,
-            .param_name = null,
-            .literal_query = query_text,
-            .limit = limit,
-            .database = database,
-            .label = label,
-            .property = property,
             .results = null,
             .current_index = 0,
             .current_doc_row_index = 0,
@@ -292,7 +269,7 @@ pub const FtsSearchWithInput = struct {
         errdefer {
             self.clearRowsByDoc();
             if (self.results) |results| {
-                self.database.freeFtsSearchResults(results);
+                self.allocator.free(results);
                 self.results = null;
             }
             if (self.opened) {
@@ -303,29 +280,57 @@ pub const FtsSearchWithInput = struct {
 
         self.clearRowsByDoc();
 
-        // Get query text - either from literal or parameter.
-        const query_text = if (self.literal_query) |lit|
-            lit
-        else if (self.param_name) |pname| blk: {
-            const param_value = ctx.getParameter(pname) orelse {
+        // Run every search and union the results.
+        //
+        // A document found by more than one search takes the best score it earned
+        // rather than a sum. Two properties matching is not evidence that either
+        // matched twice as well, and adding them would rank a document matching
+        // both weakly above one matching a single property strongly.
+        var best: std.AutoHashMapUnmanaged(NodeId, f32) = .{};
+        defer best.deinit(self.allocator);
+
+        for (self.searches) |search| {
+            const query_text = if (search.literal_query) |lit|
+                lit
+            else if (search.param_name) |pname| blk: {
+                const param_value = ctx.getParameter(pname) orelse {
+                    return OperatorError.UnboundVariable;
+                };
+                break :blk extractTextFromParam(param_value) orelse {
+                    return OperatorError.TypeError;
+                };
+            } else {
                 return OperatorError.UnboundVariable;
             };
-            break :blk extractTextFromParam(param_value) orelse {
-                return OperatorError.TypeError;
-            };
-        } else {
-            return OperatorError.UnboundVariable;
-        };
 
-        // Perform the FTS search
-        self.results = self.database.ftsSearchIndexInTxn(
-            ctx.txn,
-            .node,
-            self.label,
-            self.property,
-            query_text,
-            self.limit,
-        ) catch return OperatorError.StorageError;
+            const hits = self.database.ftsSearchIndexInTxn(
+                ctx.txn,
+                .node,
+                search.label,
+                search.property,
+                query_text,
+                self.limit,
+            ) catch return OperatorError.StorageError;
+            defer self.database.freeFtsSearchResults(hits);
+
+            for (hits) |hit| {
+                const gop = best.getOrPut(self.allocator, hit.doc_id) catch return OperatorError.OutOfMemory;
+                if (!gop.found_existing or hit.score > gop.value_ptr.*) {
+                    gop.value_ptr.* = hit.score;
+                }
+            }
+        }
+
+        const merged = self.allocator.alloc(ScoredDoc, best.count()) catch return OperatorError.OutOfMemory;
+        var merged_len: usize = 0;
+        var best_iter = best.iterator();
+        while (best_iter.next()) |entry| {
+            merged[merged_len] = .{ .doc_id = entry.key_ptr.*, .score = entry.value_ptr.* };
+            merged_len += 1;
+        }
+        std.mem.sort(ScoredDoc, merged[0..merged_len], {}, ScoredDoc.lessThan);
+        if (merged_len > self.limit) merged_len = self.limit;
+        self.results = merged[0..merged_len];
 
         // Keep only input rows whose node IDs are present in FTS results while
         // preserving full row context and multiplicity.
@@ -379,9 +384,11 @@ pub const FtsSearchWithInput = struct {
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Free search results
+        // The union is this operator's own allocation. Each search's results
+        // were freed as that search finished; what survives is what was built
+        // here, from this allocator.
         if (self.results) |results| {
-            self.database.freeFtsSearchResults(results);
+            self.allocator.free(results);
             self.results = null;
         }
 
@@ -398,7 +405,7 @@ pub const FtsSearchWithInput = struct {
 
         // Free results if not already freed
         if (self.results) |results| {
-            self.database.freeFtsSearchResults(results);
+            self.allocator.free(results);
         }
 
         self.clearRowsByDoc();

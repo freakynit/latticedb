@@ -5201,3 +5201,76 @@ test "database: a full-text match returns every row, not the first hundred" {
         try std.testing.expectEqual(@as(usize, 10), r.rowCount());
     }
 }
+
+test "database: a disjunction of full-text matches is planned as one union" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+    try db.createNodeFtsIndex("Doc", "body");
+
+    var txn = try db.beginTransaction(.read_write);
+    const only_title = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, only_title, "name", .{ .string_val = "title-only" });
+    try db.setNodeProperty(&txn, only_title, "title", .{ .string_val = "ciabatta" });
+    try db.setNodeProperty(&txn, only_title, "body", .{ .string_val = "nothing here" });
+
+    const only_body = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, only_body, "name", .{ .string_val = "body-only" });
+    try db.setNodeProperty(&txn, only_body, "title", .{ .string_val = "nothing here" });
+    try db.setNodeProperty(&txn, only_body, "body", .{ .string_val = "focaccia" });
+
+    const both = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, both, "name", .{ .string_val = "both" });
+    try db.setNodeProperty(&txn, both, "title", .{ .string_val = "ciabatta" });
+    try db.setNodeProperty(&txn, both, "body", .{ .string_val = "focaccia" });
+
+    const neither = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, neither, "name", .{ .string_val = "neither" });
+    try db.setNodeProperty(&txn, neither, "title", .{ .string_val = "brioche" });
+    try db.setNodeProperty(&txn, neither, "body", .{ .string_val = "brioche" });
+    try db.commitTransaction(&txn);
+
+    // Either side matching is enough, and a document is returned once however
+    // many sides matched it.
+    {
+        var r = try db.query(
+            "MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.body @@ 'focaccia' RETURN d.name AS n",
+        );
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 3), r.rowCount());
+    }
+
+    // Three disjuncts, including one that matches nothing, still union correctly.
+    {
+        var r = try db.query(
+            "MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.body @@ 'focaccia' OR d.title @@ 'zzznotfound' RETURN d.name AS n",
+        );
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 3), r.rowCount());
+    }
+
+    // A disjunct on the same property as another is a union of two searches of
+    // one index, which must not double-count the document that matches both.
+    {
+        var r = try db.query(
+            "MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.title @@ 'brioche' RETURN d.name AS n",
+        );
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 3), r.rowCount());
+    }
+
+    // A disjunction mixing `@@` with something else is not a union of index
+    // scans, and has to keep answering through the row filter.
+    {
+        var r = try db.query(
+            "MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.name = 'neither' RETURN d.name AS n",
+        );
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 3), r.rowCount());
+    }
+}

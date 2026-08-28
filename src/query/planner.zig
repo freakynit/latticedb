@@ -741,9 +741,16 @@ pub const QueryPlanner = struct {
             return self.planVectorSearch(input_op, vector_info);
         }
 
-        // Check for FTS pattern: x.text @@ $query
+        // Check for FTS pattern: x.text @@ $query, or a disjunction of them
         if (self.detectFtsSearch(where.condition)) |fts_info| {
-            return self.planFtsSearch(input_op, fts_info);
+            return self.planFtsSearch(input_op, &[_]FtsSearchInfo{fts_info});
+        }
+        {
+            var disjuncts: [MAX_FTS_DISJUNCTS]FtsSearchInfo = undefined;
+            var count: usize = 0;
+            if (self.collectFtsDisjuncts(where.condition, &disjuncts, &count) and count > 1) {
+                return self.planFtsSearch(input_op, disjuncts[0..count]);
+            }
         }
 
         // Default: create a filter operator
@@ -926,6 +933,46 @@ pub const QueryPlanner = struct {
         return null;
     }
 
+    /// How many `@@` predicates one WHERE clause may union.
+    ///
+    /// Well past anything written by hand, and bounded so the collected searches
+    /// can live in a fixed array rather than an allocation the operator would
+    /// have to outlive.
+    const MAX_FTS_DISJUNCTS = 16;
+
+    /// Collect a disjunction of `@@` predicates that can be planned as one scan.
+    ///
+    /// Every disjunct has to be an `@@` on the same variable. Anything else — a
+    /// different variable, a comparison, a nested AND — means the union would not
+    /// answer the same question as the original condition, so those keep the row
+    /// filter.
+    fn collectFtsDisjuncts(
+        self: *Self,
+        expr: *const ast.Expression,
+        out: *[MAX_FTS_DISJUNCTS]FtsSearchInfo,
+        count: *usize,
+    ) bool {
+        const binary = switch (expr.*) {
+            .binary => |binary| binary,
+            else => return false,
+        };
+
+        if (binary.operator == .or_) {
+            return self.collectFtsDisjuncts(binary.left, out, count) and
+                self.collectFtsDisjuncts(binary.right, out, count);
+        }
+
+        if (binary.operator != .fts_match) return false;
+        if (count.* >= MAX_FTS_DISJUNCTS) return false;
+
+        const info = self.extractFtsInfo(binary.*) orelse return false;
+        if (count.* > 0 and info.variable_slot != out[0].variable_slot) return false;
+
+        out[count.*] = info;
+        count.* += 1;
+        return true;
+    }
+
     /// Extract FTS search info from a binary expression with fts_match operator
     fn extractFtsInfo(self: *Self, binary: ast.BinaryExpr) ?FtsSearchInfo {
         var info = FtsSearchInfo{
@@ -998,43 +1045,42 @@ pub const QueryPlanner = struct {
         return PlannerError.MissingFtsIndex;
     }
 
-    /// Plan an FTS search operator
-    fn planFtsSearch(self: *Self, input: Operator, info: FtsSearchInfo) PlannerError!Operator {
+    /// Plan an FTS search operator over one or more `@@` predicates.
+    ///
+    /// Several predicates mean a disjunction, which is planned as one scan of
+    /// each index rather than a filter that searches an index per row. A document
+    /// found by more than one takes its best score, which is what the ranking of
+    /// an OR should mean: either side matching is enough, and matching both is
+    /// not evidence of matching either one better.
+    fn planFtsSearch(self: *Self, input: Operator, infos: []const FtsSearchInfo) PlannerError!Operator {
         _ = self.storage.fts_index orelse return PlannerError.MissingStorage;
         const database = self.storage.database orelse return PlannerError.MissingStorage;
+        if (infos.len == 0) return PlannerError.InvalidQuery;
 
-        const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
-        const label = try self.resolveFtsIndex(info);
-        const property = info.property_name orelse return PlannerError.InvalidQuery;
+        const output_slot = infos[0].variable_slot orelse return PlannerError.InvalidQuery;
 
-        if (info.query_text) |query_text| {
-            const fts_search = fts_ops.FtsSearchWithInput.initWithLiteral(
-                self.allocator,
-                input,
-                output_slot,
-                query_text,
-                fts_ops.NO_RESULT_LIMIT,
-                database,
-                label,
-                property,
-            ) catch {
-                return PlannerError.OutOfMemory;
+        const searches = self.allocator.alloc(fts_ops.Search, infos.len) catch {
+            return PlannerError.OutOfMemory;
+        };
+        for (infos, 0..) |info, i| {
+            const label = try self.resolveFtsIndex(info);
+            const property = info.property_name orelse return PlannerError.InvalidQuery;
+            if (info.query_text == null and info.param_name == null) return PlannerError.InvalidQuery;
+            searches[i] = .{
+                .label = label,
+                .property = property,
+                .param_name = info.param_name,
+                .literal_query = info.query_text,
             };
-
-            return fts_search.operator();
         }
-
-        const param_name = info.param_name orelse return PlannerError.InvalidQuery;
 
         const fts_search = fts_ops.FtsSearchWithInput.init(
             self.allocator,
             input,
             output_slot,
-            param_name,
+            searches,
             fts_ops.NO_RESULT_LIMIT,
             database,
-            label,
-            property,
         ) catch {
             return PlannerError.OutOfMemory;
         };
